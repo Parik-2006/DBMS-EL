@@ -1,0 +1,69 @@
+{% extends "nav.html" %}
+{% block content %}
+{% load static %}
+
+
+<div class="body_bg layout_padding">
+ <!-- contact section -->
+
+ <section class="contact_section">
+    <div class="container">
+      <div class="heading_container">
+        <h2>
+          Predict Malicious Bot
+        </h2>
+      </div>
+    </div>
+    <div class="container contact_bg layout_padding2-top">
+      <div class="row">
+        <div class="col-md-6">
+          <div class="contact_form ">
+            <h3>Your Prediction History</h3>
+            {% if data and data|length > 0 %}
+            <div style="overflow-x:auto;">
+              <table class="table table-bordered table-striped" style="background:white;">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>URL</th>
+                    <th>Prediction</th>
+                    <th>Type</th>
+                    <th>Confidence</th>
+                    <th>Timestamp</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for item in data %}
+                  <tr>
+                    <td>{{ forloop.counter }}</td>
+                    <td style="word-break:break-all;">{{ item.url }}</td>
+                    <td>{{ item.prediction }}</td>
+                    <td>{{ item.prediction_type }}</td>
+                    <td>{{ item.confidence }}</td>
+                    <td>{{ item.timestamp }}</td>
+                  </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+            {% else %}
+              <p>No prediction history found. Make a prediction to get started!</p>
+            {% endif %}
+          </div>
+        </div>
+        <div class="col-md-6">
+          <div class="img-box">
+            <img src="images/contact-img.jpg" alt="">
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- end contact section -->
+
+</div>
+
+
+
+{% endblock %}

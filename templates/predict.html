@@ -1,0 +1,58 @@
+{% extends "nav.html" %}
+{% block content %}
+{% load static %}
+
+
+<div class="body_bg layout_padding">
+ <!-- contact section -->
+
+ <section class="contact_section">
+    <div class="container">
+      <div class="heading_container">
+        <h2>
+          Predict Malicious Bot
+        </h2>
+      </div>
+    </div>
+    <div class="container contact_bg layout_padding2-top">
+      <div class="row">
+        <div class="col-md-6">
+          <div class="contact_form ">
+            <form method="post">
+                {% csrf_token %}
+              <textarea name="url" rows="5" cols="80" 
+              placeholder="Enter URL to check" required></textarea>
+              
+               <button type="submit">
+                Predict
+              </button>
+            </form>
+            
+            {% if prediction %}
+            <div style="margin-top: 20px; padding: 15px; background-color: #f0f0f0; border-radius: 5px;">
+              <h4>Prediction Result:</h4>
+              <p><strong>URL:</strong> {{ url }}</p>
+              <p><strong>Prediction:</strong> {{ prediction }}</p>
+              {% if prediction_type %}
+              <p><strong>Type:</strong> {{ prediction_type }}</p>
+              {% endif %}
+            </div>
+            {% endif %}
+          </div>
+        </div>
+        <div class="col-md-6">
+          <div class="img-box">
+            <img src="images/contact-img.jpg" alt="">
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- end contact section -->
+
+</div>
+
+
+
+{% endblock %}
