@@ -60,7 +60,9 @@ staticfiles/
 
 # Virtual environments
 .venv/
+.venv_canonical/
 venv/
+env/
 
 # VS Code
 .vscode/
@@ -79,6 +81,9 @@ Desktop.ini
 .env
 .env.*
 *.env
+
+# Temporary/debug scripts
+query_db_canonical.py
 
 # Python cache artifacts
 *.pyc
