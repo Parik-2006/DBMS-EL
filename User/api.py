@@ -87,16 +87,13 @@ def fallback_result(request):
     API endpoint for fallback system to return analysis results
     """
     try:
-        # Print for debugging
-        print(f"Fallback result request body: {request.body}")
-        
+        # Use simple print for debugging in local env
         data = json.loads(request.body)
         
         result = FallbackIntegrationService.process_fallback_result(data)
         
-        print(f"Process result: {result}")
-        
-        status_code = 200 if result['success'] else 400
+        # Ensure we return JSON in all cases
+        status_code = 200 if result.get('success', False) else 400
         return JsonResponse(result, status=status_code)
     
     except json.JSONDecodeError:
@@ -106,7 +103,7 @@ def fallback_result(request):
             'errors': ['Request body must be valid JSON']
         }, status=400)
     except Exception as e:
-        print(f"Error: {e}")
+        # Important: log and return proper JSON error
         return JsonResponse({
             'success': False,
             'message': f'Server error: {str(e)}',

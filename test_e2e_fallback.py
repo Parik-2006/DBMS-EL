@@ -13,10 +13,16 @@ from User.models import Scan, URL, Domain, Prediction
 from User.services.nikhil.orchestration_service import FallbackOrchestrator
 from User.services.nikhil.final_classifier import FinalClassifier
 
+from django.conf import settings
+settings.DEBUG = True
+
 def run_e2e_test():
     print("=" * 60)
     print("END-TO-END FALLBACK INTEGRATION TEST")
     print("=" * 60)
+
+    # Use EnforceCSRFChecks=False to bypass CSRF in test client
+    client = Client(enforce_csrf_checks=False)
 
     # 1. Setup Test Data in MySQL
     print("Step 1: Setting up PARI test data...")
@@ -38,6 +44,12 @@ def run_e2e_test():
     )
     
     print(f"Created UNCERTAIN scan: {scan.id}")
+
+    # Check if other endpoints work
+    print("\nChecking /api/fallback/uncertain-scans/ ...")
+    response_list = client.get('/api/fallback/uncertain-scans/')
+    print(f"Status: {response_list.status_code}")
+    print(f"Content: {response_list.content.decode()[:100]}")
 
     # 2. Run Nikhil Orchestration
     print("\nStep 2: Running Nikhil Deep Analysis Orchestration...")
@@ -62,6 +74,7 @@ def run_e2e_test():
 
     # 4. Return Result to PARI (via API)
     print("\nStep 4: Returning Result to PARI Integration Endpoint...")
+    
     payload = {
         "scan_id": scan.id,
         "analysis_status": "COMPLETED",
@@ -75,19 +88,20 @@ def run_e2e_test():
         "original_confidence": 0.60
     }
     
-    client = Client()
     response = client.post(
         '/api/fallback/result/',
         data=json.dumps(payload),
         content_type='application/json'
     )
     
-    print(f"API Response Status: {response.status_code}")
-    # Debugging: Print full response for 400
-    if response.status_code == 400:
-        print(f"API Response JSON: {response.json() if 'application/json' in response['Content-Type'] else 'Not JSON'}")
+    # Try to parse JSON always to get validation errors
+    try:
+        response_data = response.json()
+        print(f"API Response JSON: {json.dumps(response_data, indent=2)}")
+    except Exception:
+        print(f"API Response Content: {response.content.decode()}")
 
-    # 5. Verify PARI MySQL Update
+    # 5. Verify PARI SQL Update
     print("\nStep 5: Verifying PARI SQL Update...")
     scan.refresh_from_db()
     prediction = scan.prediction
