@@ -3,6 +3,35 @@ from django.contrib.auth.models import User
 from django.core.validators import URLValidator, validate_ipv4_address
 from django.db.models import Avg, Max, Min, Count
 
+class AnalystReview(models.Model):
+    """Analyst review record for Unknown/Needs Review cases"""
+    
+    VALIDATION_CHOICES = [
+        ('Benign', 'Benign'),
+        ('Phishing', 'Phishing'),
+        ('Malware', 'Malware'),
+        ('Defacement', 'Defacement'),
+        ('Still Unknown', 'Still Unknown'),
+    ]
+    
+    VALIDATED_CHOICES = [
+        ('VALIDATED', 'Validated for future training'),
+        ('NOT_VALIDATED', 'Not validated'),
+    ]
+    
+    scan = models.OneToOneField('Scan', on_delete=models.CASCADE, related_name='analyst_review')
+    reviewer = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+    reviewed_at = models.DateTimeField(auto_now_add=True)
+    final_label = models.CharField(max_length=20, choices=VALIDATION_CHOICES)
+    review_notes = models.TextField(blank=True, null=True)
+    validation_status = models.CharField(max_length=20, choices=VALIDATED_CHOICES, default='NOT_VALIDATED')
+    
+    class Meta:
+        db_table = 'pari_analyst_review'
+        
+    def __str__(self):
+        return f"Review for Scan {self.scan.id}: {self.final_label}"
+
 class MaliciousBot(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, null=True, blank=True)
     url = models.TextField()

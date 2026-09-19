@@ -19,4 +19,7 @@ urlpatterns=[
     path('api/fallback/scan-status/<int:scan_id>/', api.scan_status, name='scan_status'),
     path('api/correlation/domain/<int:domain_id>/', api.domain_correlation, name='domain_correlation'),
     path('api/correlation/malicious-ips/', api.malicious_ips, name='malicious_ips'),
+    
+    path('api/nikhil/submit-review/', api.submit_review, name='submit_review'),
+    path('api/nikhil/investigation/<int:scan_id>/', api.investigation_detail, name='investigation_detail'),
 ]
