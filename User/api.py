@@ -80,29 +80,21 @@ def investigation_detail(request, scan_id):
     except Exception as e:
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
 
-@require_http_methods(["GET"])
+@csrf_exempt
+@require_http_methods(["POST"])
 def fallback_result(request):
     """
     API endpoint for fallback system to return analysis results
-    
-    POST endpoint: /api/fallback/result/
-    
-    Expected JSON body:
-    {
-        "scan_id": int,
-        "analysis_status": str,
-        "final_classification": str,
-        "risk_level": str,
-        "risk_score": float,
-        "evidence_summary": str,
-        "threat_indicators": [str],
-        "mongo_document_reference": str (optional)
-    }
     """
     try:
+        # Print for debugging
+        print(f"Fallback result request body: {request.body}")
+        
         data = json.loads(request.body)
         
         result = FallbackIntegrationService.process_fallback_result(data)
+        
+        print(f"Process result: {result}")
         
         status_code = 200 if result['success'] else 400
         return JsonResponse(result, status=status_code)
@@ -114,6 +106,7 @@ def fallback_result(request):
             'errors': ['Request body must be valid JSON']
         }, status=400)
     except Exception as e:
+        print(f"Error: {e}")
         return JsonResponse({
             'success': False,
             'message': f'Server error: {str(e)}',
