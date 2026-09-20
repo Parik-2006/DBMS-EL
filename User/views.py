@@ -643,6 +643,9 @@ def predict(request):
                     evidence_summary = analysis_result.get('evidence_summary', '')
                     threat_indicators = analysis_result.get('threat_indicators', [])
                     mongo_ref = analysis_result.get('mongo_document_reference')
+                    corroboration = analysis_result.get('corroboration', {})
+                    module_statuses = analysis_result.get('module_statuses', {})
+                    evidence_breakdown = analysis_result.get('evidence_breakdown', {})
 
                     prediction_result = f"Deep Analysis Result: {final_classification} (Risk: {risk_level}, Score: {risk_score:.2f})"
                     prediction_type = final_classification
@@ -672,6 +675,9 @@ def predict(request):
                         'evidence_summary': evidence_summary,
                         'threat_indicators': threat_indicators,
                         'mongo_ref': mongo_ref,
+                        'corroboration': corroboration,
+                        'module_statuses': module_statuses,
+                        'evidence_breakdown': evidence_breakdown,
                         'prediction': prediction_result,
                         'prediction_type': final_classification,
                         'confidence': f"Initial: {initial_confidence_str} (Below {threshold * 100:.0f}% threshold)"

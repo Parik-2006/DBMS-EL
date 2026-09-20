@@ -2,11 +2,9 @@
 {% block content %}
 {% load static %}
 
-
 <div class="body_bg layout_padding">
- <!-- contact section -->
-
- <section class="contact_section">
+  <!-- contact section -->
+  <section class="contact_section">
     <div class="container">
       <div class="heading_container">
         <h2>
@@ -16,58 +14,176 @@
     </div>
     <div class="container contact_bg layout_padding2-top">
       <div class="row">
-        <div class="col-md-6">
-          <div class="contact_form ">
+        <div class="col-md-7">
+          <div class="contact_form">
             <form method="post">
-                {% csrf_token %}
-              <textarea name="url" rows="5" cols="80" 
-              placeholder="Enter URL to check" required></textarea>
+              {% csrf_token %}
+              <textarea name="url" rows="4" cols="80" 
+              placeholder="Enter URL to check (e.g. https://example.com)" required></textarea>
               
-               <button type="submit">
+              <button type="submit" style="margin-top: 15px;">
                 Predict
               </button>
             </form>
             
             {% if prediction %}
-            <div style="margin-top: 20px; padding: 20px; background-color: #ffffff; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); border-left: 5px solid {% if is_confident %}#28a745{% else %}#e93f1a{% endif %};">
-              <h4 style="margin-bottom: 12px; font-weight: 700; color: #333;">Analysis Result</h4>
-              <p style="margin-bottom: 8px;"><strong>URL:</strong> <span style="word-break: break-all;">{{ url }}</span></p>
+            <div style="margin-top: 25px; padding: 22px; background-color: #ffffff; border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); border-left: 6px solid {% if is_confident %}#28a745{% else %}#ff9800{% endif %};">
+              <h4 style="margin-bottom: 15px; font-weight: 700; color: #1a202c;">Security Analysis Report</h4>
+              <p style="margin-bottom: 12px; font-size: 14px;"><strong>Target URL:</strong> <code style="word-break: break-all; color: #2d3748; background: #edf2f7; padding: 3px 6px; border-radius: 4px;">{{ url }}</code></p>
 
               {% if is_confident %}
-              <div class="alert alert-success" style="margin-top: 10px; margin-bottom: 0;">
-                <h5 style="margin-bottom: 5px; font-weight: 700;">Classification: {{ prediction_type }}</h5>
-                <p style="margin-bottom: 0;">Status: <span class="badge badge-success">CONFIDENT</span> (Model Confidence: <strong>{{ confidence }}</strong> &ge; 75% threshold)</p>
-              </div>
-              {% else %}
-              <div class="alert alert-warning" style="margin-top: 10px; margin-bottom: 12px;">
-                <p style="margin-bottom: 4px;"><strong>Initial ML Prediction:</strong> {{ initial_prediction }} (Confidence: <strong>{{ initial_confidence }}</strong> &lt; 75% threshold &rarr; <span class="badge badge-warning">UNCERTAIN</span>)</p>
-                <p style="margin-bottom: 0;"><strong>Fallback Deep Analysis:</strong> <span class="badge badge-info">COMPLETED</span></p>
+              <!-- CONFIDENT RESULT -->
+              <div class="card border-success" style="margin-top: 12px; background: #f0fff4; border: 1px solid #c6f6d5; border-radius: 8px; padding: 16px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                  <span style="font-size: 13px; font-weight: 600; color: #22543d; text-transform: uppercase; letter-spacing: 0.5px;">INITIAL ML EVALUATION</span>
+                  <span class="badge badge-success" style="font-size: 12px; padding: 5px 10px;">CONFIDENT</span>
+                </div>
+                <div style="margin-bottom: 8px;">
+                  <strong style="color: #276749;">Initial ML Prediction:</strong> <span style="font-size: 16px; font-weight: bold; color: #22543d;">{{ prediction_type }}</span>
+                </div>
+                <div style="margin-bottom: 10px; color: #2d3748; font-size: 14px;">
+                  <strong>Model Confidence:</strong> <span style="font-weight: 700; color: #22543d;">{{ confidence }}</span> &ge; 75.00% threshold
+                </div>
+                <hr style="border-top: 1px solid #c6f6d5; margin: 10px 0;">
+                <div style="display: flex; align-items: center; justify-content: space-between;">
+                  <span style="font-weight: 700; font-size: 16px; color: #22543d;">Final Classification:</span>
+                  <span style="font-size: 18px; font-weight: 800; color: #22543d;">{{ prediction_type }}</span>
+                </div>
               </div>
 
-              <div style="background: #f8f9fa; padding: 14px; border-radius: 6px; border: 1px solid #e9ecef;">
-                <h5 style="color: #e93f1a; font-weight: 700; margin-bottom: 8px;">Final Classification: {{ final_classification }}</h5>
-                <p style="margin-bottom: 6px;"><strong>Risk Level:</strong> <span class="badge badge-{% if risk_level == 'CRITICAL' %}danger{% elif risk_level == 'HIGH' %}warning{% elif risk_level == 'MEDIUM' %}secondary{% else %}success{% endif %}">{{ risk_level }}</span> (Risk Score: {{ risk_score }})</p>
-                {% if evidence_summary %}
-                <p style="margin-bottom: 6px;"><strong>Evidence Summary:</strong> {{ evidence_summary }}</p>
-                {% endif %}
-                {% if threat_indicators %}
-                <p style="margin-bottom: 4px;"><strong>Threat Indicators:</strong></p>
-                <ul style="margin-bottom: 6px; padding-left: 20px;">
-                  {% for ind in threat_indicators %}
-                  <li><code>{{ ind }}</code></li>
+              {% else %}
+              <!-- UNCERTAIN RESULT WITH DEEP FALLBACK ANALYSIS -->
+              <!-- Stage 1: Initial ML Assessment -->
+              <div style="background: #fffaf0; border: 1px solid #feebc8; border-radius: 8px; padding: 14px; margin-bottom: 14px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                  <span style="font-size: 12px; font-weight: 700; color: #7b341e; text-transform: uppercase; letter-spacing: 0.5px;">STAGE 1 &mdash; INITIAL ML EVALUATION</span>
+                  <span class="badge badge-warning" style="font-size: 11px; padding: 4px 8px; background-color: #ed8936; color: white;">UNCERTAIN (&lt; 75%)</span>
+                </div>
+                <div style="font-size: 14px; color: #4a5568;">
+                  <strong>Initial ML Prediction:</strong> <span style="font-weight: 700; color: #9c4221;">{{ initial_prediction }}</span> &nbsp;|&nbsp; 
+                  <strong>Confidence:</strong> <span style="font-weight: 700; color: #9c4221;">{{ initial_confidence }}</span>
+                  <span class="text-muted" style="font-size: 12px;">(Below 75% threshold &rarr; routed to Nikhil Fallback)</span>
+                </div>
+              </div>
+
+              <!-- Stage 2: Fallback Deep Analysis Modules Status -->
+              <div style="background: #ebf8ff; border: 1px solid #bee3f8; border-radius: 8px; padding: 14px; margin-bottom: 14px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                  <span style="font-size: 12px; font-weight: 700; color: #2c5282; text-transform: uppercase; letter-spacing: 0.5px;">STAGE 2 &mdash; DEEP EVIDENCE COLLECTORS</span>
+                  <span class="badge badge-info" style="font-size: 11px; padding: 4px 8px; background-color: #3182ce; color: white;">COMPLETED</span>
+                </div>
+                <div class="row" style="font-size: 13px;">
+                  <div class="col-sm-6" style="margin-bottom: 6px;">
+                    <strong>Webpage Analysis:</strong>
+                    {% if module_statuses.webpage == 'SUCCESS' %}
+                    <span class="badge badge-success">SUCCESS</span>
+                    {% elif module_statuses.webpage == 'SKIPPED' %}
+                    <span class="badge badge-secondary">SKIPPED</span>
+                    {% else %}
+                    <span class="badge badge-secondary">{{ module_statuses.webpage|default:'COMPLETED' }}</span>
+                    {% endif %}
+                  </div>
+                  <div class="col-sm-6" style="margin-bottom: 6px;">
+                    <strong>Network Analysis:</strong>
+                    {% if module_statuses.network == 'SUCCESS' %}
+                    <span class="badge badge-success">SUCCESS</span>
+                    {% else %}
+                    <span class="badge badge-secondary">{{ module_statuses.network|default:'COMPLETED' }}</span>
+                    {% endif %}
+                  </div>
+                  <div class="col-sm-6" style="margin-bottom: 6px;">
+                    <strong>Visual Analysis:</strong>
+                    {% if module_statuses.visual == 'SUCCESS' %}
+                    <span class="badge badge-success">SUCCESS</span>
+                    {% else %}
+                    <span class="badge badge-secondary" title="Browser automation offline/isolated">UNAVAILABLE</span>
+                    {% endif %}
+                  </div>
+                  <div class="col-sm-6" style="margin-bottom: 6px;">
+                    <strong>Threat Intelligence:</strong>
+                    {% if module_statuses.threat_intelligence == 'CONFIGURED' or module_statuses.threat_intelligence == 'SUCCESS' %}
+                    <span class="badge badge-success">CONFIGURED</span>
+                    {% else %}
+                    <span class="badge badge-secondary" title="No external API key configured; SQL correlation active">UNAVAILABLE</span>
+                    {% endif %}
+                  </div>
+                  <div class="col-sm-6" style="margin-bottom: 6px;">
+                    <strong>Prompt Injection:</strong>
+                    {% if module_statuses.prompt_injection == 'DETECTED' %}
+                    <span class="badge badge-danger">DETECTED</span>
+                    {% else %}
+                    <span class="badge badge-success">NOT DETECTED</span>
+                    {% endif %}
+                  </div>
+                  <div class="col-sm-6" style="margin-bottom: 6px;">
+                    <strong>AI Analysis:</strong>
+                    <span class="badge badge-secondary" title="Real LLM excluded in this phase">MOCK / NOT AVAILABLE</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Stage 3: Multi-Family Corroboration & Evidence Summary -->
+              <div style="background: #f7fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 14px; margin-bottom: 14px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                  <span style="font-size: 12px; font-weight: 700; color: #4a5568; text-transform: uppercase; letter-spacing: 0.5px;">STAGE 3 &mdash; EVIDENCE CORROBORATION</span>
+                  <span class="badge badge-{% if corroboration.strength == 'STRONG' %}success{% elif corroboration.strength == 'MODERATE' %}info{% elif corroboration.strength == 'WEAK' %}warning{% else %}secondary{% endif %}">
+                    {{ corroboration.independent_families|default:0 }} INDEPENDENT FAMILIES ({{ corroboration.strength|default:'INSUFFICIENT' }})
+                  </span>
+                </div>
+                
+                {% if corroboration.families_used %}
+                <p style="margin-bottom: 6px; font-size: 13px;">
+                  <strong>Evidence Families Used:</strong> 
+                  {% for fam in corroboration.families_used %}
+                  <span class="badge badge-light" style="border: 1px solid #cbd5e0; margin-right: 4px;">{{ fam }}</span>
                   {% endfor %}
-                </ul>
+                </p>
                 {% endif %}
+
+                {% if evidence_summary %}
+                <p style="margin-bottom: 8px; font-size: 13px; color: #2d3748;">
+                  <strong>Evidence Summary:</strong> {{ evidence_summary }}
+                </p>
+                {% endif %}
+
+                {% if threat_indicators %}
+                <p style="margin-bottom: 4px; font-size: 13px;"><strong>Observed Threat Indicators:</strong></p>
+                <div style="margin-bottom: 8px;">
+                  {% for ind in threat_indicators %}
+                  <code style="background: #fed7d7; color: #9b2c2c; padding: 2px 6px; border-radius: 4px; font-size: 12px; margin-right: 4px; display: inline-block; margin-bottom: 4px;">{{ ind }}</code>
+                  {% endfor %}
+                </div>
+                {% endif %}
+
                 {% if mongo_ref %}
-                <p style="margin-bottom: 0;"><small class="text-muted">MongoDB Reference: <code>{{ mongo_ref }}</code></small></p>
+                <p style="margin-bottom: 0; font-size: 12px; color: #718096;">
+                  <strong>MongoDB Case Reference:</strong> <code>{{ mongo_ref }}</code>
+                </p>
                 {% endif %}
               </div>
+
+              <!-- Stage 4: Final Fallback Classification -->
+              <div style="background: #ffffff; border: 2px solid {% if final_classification == 'Phishing' or final_classification == 'Malware' %}#e53e3e{% elif final_classification == 'Defacement' %}#dd6b20{% elif final_classification == 'Benign' %}#38a169{% else %}#718096{% endif %}; border-radius: 8px; padding: 16px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                  <span style="font-size: 12px; font-weight: 700; color: #4a5568; text-transform: uppercase; letter-spacing: 0.5px;">STAGE 4 &mdash; FINAL FALLBACK CLASSIFICATION</span>
+                  <span class="badge badge-{% if risk_level == 'CRITICAL' %}danger{% elif risk_level == 'HIGH' %}warning{% elif risk_level == 'MEDIUM' %}secondary{% else %}success{% endif %}" style="font-size: 12px; padding: 4px 10px;">
+                    RISK: {{ risk_level }} (Score: {{ risk_score }})
+                  </span>
+                </div>
+                <div style="display: flex; align-items: baseline; justify-content: space-between; margin-top: 4px;">
+                  <h4 style="margin: 0; font-weight: 800; color: {% if final_classification == 'Phishing' or final_classification == 'Malware' %}#c53030{% elif final_classification == 'Defacement' %}#c05621{% elif final_classification == 'Benign' %}#276749{% else %}#4a5568{% endif %};">
+                    {{ final_classification }}
+                  </h4>
+                  <span style="font-size: 13px; color: #718096;">(Separated from initial ML: {{ initial_prediction }})</span>
+                </div>
+              </div>
               {% endif %}
+
             </div>
             {% endif %}
           </div>
         </div>
-        <div class="col-md-6">
+        <div class="col-md-5">
           <div class="img-box">
             <img src="{% static 'images/contact-img.jpg' %}" alt="">
           </div>
@@ -75,11 +191,7 @@
       </div>
     </div>
   </section>
-
   <!-- end contact section -->
-
 </div>
-
-
 
 {% endblock %}

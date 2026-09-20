@@ -133,7 +133,7 @@ class MLPredictionService:
                 'timestamp': str
             }
         """
-        if not scan_obj.prediction:
+        if not hasattr(scan_obj, 'prediction') or not scan_obj.prediction:
             return None
         
         prediction = scan_obj.prediction
