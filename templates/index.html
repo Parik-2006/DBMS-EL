@@ -1,6 +1,6 @@
 {% extends "nav.html" %}
-{% block content %}
 {% load static %}
+{% block hero_content %}
     <!-- slider section -->
     <section class=" slider_section position-relative">
       <div id="carouselExampleIndicators" class="carousel slide" data-ride="carousel">
@@ -24,8 +24,11 @@
                       <p>
                         Machine learning (ML) can be used to detect malicious bots by analyzing network traffic, user behavior, and other data.
                       </p>
-                      
-                     
+                      <div class="btn-box">
+                        <a href="/login" class="btn-1">
+                          Get Started
+                        </a>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -48,8 +51,8 @@
                         Machine learning (ML) can be used to detect malicious bots by analyzing network traffic, user behavior, and other data.
                       </p>
                       <div class="btn-box">
-                        <a href="" class="btn-1">
-                          Contact Us
+                        <a href="/register" class="btn-1">
+                          Register Now
                         </a>
                       </div>
                     </div>
@@ -70,7 +73,8 @@
       </div>
     </section>
     <!-- end slider section -->
-  </div>
+{% endblock %}
+{% block content %}
 
   <!-- about section -->
 

@@ -34,7 +34,7 @@
   <link href="{% static 'css/responsive.css' %}" rel="stylesheet" />
 </head>
 
-<body>
+<body class="sub_page">
   <div class="hero_area">
     <!-- header section strats -->
     <header class="header_section">
@@ -54,14 +54,14 @@
             <div class="d-flex ml-auto flex-column flex-lg-row align-items-center">
               <ul class="navbar-nav  ">
                 <li class="nav-item active">
-                  <a class="nav-link" href="admin">Home <span class="sr-only">(current)</span></a>
+                  <a class="nav-link" href="/adminhome">Home <span class="sr-only">(current)</span></a>
                 </li>
                   <li class="nav-item">
-                    <a class="nav-link" href="logout"> Logout </a>
+                    <a class="nav-link" href="/logout"> Logout </a>
                   </li>
                 </ul>
               <form class="form-inline">
-                <button class="btn  my-2 my-sm-0 nav_search-btn" type="submit"></button>
+                <button class="btn  my-2 my-sm-0 nav_search-btn" type="button"></button>
               </form>
             </div>
           </div>
@@ -69,6 +69,7 @@
       </div>
     </header>
     <!-- end header section -->
+  </div>
 
    
 
