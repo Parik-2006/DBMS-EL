@@ -112,7 +112,7 @@ class FallbackIntegrationService:
                     'errors': errors
                 }
             
-            if scan.prediction:
+            if hasattr(scan, 'prediction') and scan.prediction:
                 scan.prediction.predicted_class = final_classification
                 scan.prediction.risk_score = risk_score
                 scan.prediction.model_name = 'DeepAnalysis'

@@ -537,125 +537,147 @@ def predict(request):
                 prediction_result = "Mock prediction: URL appears safe (ML not available)"
                 prediction_type = "Safe"
                 confidence = "N/A"
+                return render(request, 'predict.html', {
+                    'prediction': prediction_result,
+                    'url': url,
+                    'prediction_type': prediction_type,
+                    'is_confident': True,
+                    'confidence': confidence
+                })
             else:
-                try:
-                    # Lazy train model on first prediction if not already trained
-                    if not model_trained:
-                        print(f"[PREDICT] Training model on first prediction request...")
-                        messages.info(request, 'Training model on first request... Please wait.')
-                        if not train_model():
-                            print(f"[PREDICT] Model training failed")
-                            messages.error(request, 'Failed to train prediction model')
-                            return render(request, 'predict.html')
-                        print(f"[PREDICT] Model trained successfully")
+                # Lazy train model on first prediction if not already trained
+                if not model_trained:
+                    print(f"[PREDICT] Training model on first prediction request...")
+                    messages.info(request, 'Training model on first request... Please wait.')
+                    if not train_model():
+                        print(f"[PREDICT] Model training failed")
+                        messages.error(request, 'Failed to train prediction model')
+                        return render(request, 'predict.html')
+                    print(f"[PREDICT] Model trained successfully")
 
-                    # Extract features from the URL
-                    try:
-                        print(f"[PREDICT] Extracting features from URL")
-                        url_len = get_url_length(str(url))
-                        letters_count = count_letters(url)
-                        digits_count = count_digits(url)
-                        special_chars_count = count_special_chars(url)
-                        shortened = has_shortening_service(url)
-                        abnormal = abnormal_url(url)
-                        secure = secure_http(url)
-                        have_ip = have_ip_address(url)
-                        pri_domain = extract_root_domain(url)
-                        url_region = hash_encode(get_url_region(str(pri_domain)))
-                        root_domain = hash_encode(str(pri_domain))
-                        print(f"[PREDICT] Features extracted successfully")
-                    except Exception as e:
-                        error_msg = f'Error extracting URL features: {str(e)}'
-                        print(f"[PREDICT] Feature extraction error: {error_msg}")
-                        print(traceback.format_exc())
-                        messages.error(request, error_msg)
-                        prediction_result = error_msg
-                        prediction_type = "Error"
-                        confidence = "N/A"
-                        raise
+                from User.models import Domain, URL, Scan, Prediction
+                from User.services import get_confidence_threshold
+                from User.services.ml_service import MLPredictionService
+                from User.services.fallback_service import FallbackIntegrationService
+                from User.services.nikhil.nikhil_service import NikhilService
 
-                    # Create feature array
-                    try:
-                        print(f"[PREDICT] Creating feature array")
-                        features = np.array([[url_len, letters_count, digits_count, special_chars_count,
-                                            shortened, abnormal, secure, have_ip, url_region, root_domain]])
-                        print(f"[PREDICT] Feature array created: shape={features.shape}")
-                    except Exception as e:
-                        error_msg = f'Error creating feature array: {str(e)}'
-                        print(f"[PREDICT] Feature array error: {error_msg}")
-                        print(traceback.format_exc())
-                        messages.error(request, error_msg)
-                        prediction_result = error_msg
-                        prediction_type = "Error"
-                        confidence = "N/A"
-                        raise
-
-                    # Make prediction
-                    if pipeline is not None and model_trained:
-                        try:
-                            print(f"[PREDICT] Making prediction with model")
-                            prediction = pipeline.predict(features)[0]
-                            prediction_proba = pipeline.predict_proba(features)[0]
-                            print(f"[PREDICT] Prediction made: {prediction}, Probabilities: {prediction_proba}")
-
-                            # Map prediction to type
-                            type_mapping = {0: 'Benign', 1: 'Defacement', 2: 'Phishing', 3: 'Malware'}
-                            prediction_type = type_mapping.get(prediction, 'Unknown')
-
-                            # Calculate confidence
-                            confidence = f"{max(prediction_proba) * 100:.2f}%"
-
-                            prediction_result = f"URL classified as: {prediction_type} (Confidence: {confidence})"
-                            print(f"[PREDICT] Result: {prediction_result}")
-                            messages.success(request, f'Prediction completed: {prediction_type}')
-                        except Exception as e:
-                            error_msg = f'Error making prediction: {str(e)}'
-                            print(f"[PREDICT] Prediction error: {error_msg}")
-                            print(traceback.format_exc())
-                            messages.error(request, error_msg)
-                            prediction_result = error_msg
-                            prediction_type = "Error"
-                            confidence = "N/A"
-                    else:
-                        error_msg = "Model not trained yet. Please try again later."
-                        print(f"[PREDICT] {error_msg}")
-                        messages.warning(request, error_msg)
-                        prediction_result = error_msg
-                        prediction_type = "Unknown"
-                        confidence = "N/A"
-
-                except Exception as e:
-                    if prediction_result is None:
-                        error_msg = f"Unexpected error during prediction: {str(e)}"
-                        print(f"[PREDICT] Prediction exception: {error_msg}")
-                        print(traceback.format_exc())
-                        messages.error(request, error_msg)
-                        prediction_result = error_msg
-                        prediction_type = "Error"
-                        confidence = "N/A"
-
-            # Save to database
-            try:
-                print(f"[PREDICT] Saving to database for user: {user}")
-                MaliciousBot.objects.create(
-                    user=user if user.is_authenticated else None,
-                    url=url,
-                    prediction=prediction_result or "Unknown error",
-                    prediction_type=prediction_type or "Error",
-                    confidence=confidence or "N/A"
+                # 1. Normalize Domain and URL in database
+                pri_domain = extract_root_domain(url)
+                domain_obj, _ = Domain.objects.get_or_create(
+                    domain_name=str(pri_domain),
+                    defaults={'tld': os.path.splitext(str(pri_domain))[1] or None}
                 )
-                print(f"[PREDICT] Successfully saved prediction to database for URL: {url}")
-            except Exception as e:
-                error_msg = f"Database save error: {str(e)}"
-                print(f"[PREDICT] {error_msg}")
-                print(traceback.format_exc())
-                messages.warning(request, 'Prediction completed but could not be saved to history')
+                url_obj, _ = URL.objects.get_or_create(
+                    url=url,
+                    defaults={'domain': domain_obj, 'source': 'USER_SCAN'}
+                )
 
-            return render(request, 'predict.html', {
-                'prediction': prediction_result,
-                'url': url,
-                'prediction_type': prediction_type
-            })
+                # 2. Create Scan record
+                scan = MLPredictionService.create_scan_record(url_obj, user=user if user.is_authenticated else None)
+
+                # 3. Make ML prediction using PARI MLPredictionService
+                pred_data = MLPredictionService.make_prediction(pipeline, url, scan)
+                initial_prediction = pred_data['predicted_class']
+                initial_confidence_float = pred_data['confidence']
+                initial_confidence_str = f"{initial_confidence_float * 100:.2f}%"
+                is_confident = pred_data['is_confident']
+                threshold = get_confidence_threshold()
+
+                print(f"[PREDICT] Scan {scan.id} prediction: {initial_prediction}, Confidence: {initial_confidence_str}, Threshold: {threshold:.2f}, Confident: {is_confident}")
+
+                context = {
+                    'url': url,
+                    'scan_id': scan.id,
+                }
+
+                # 4. Check confidence threshold
+                if is_confident:
+                    # CONFIDENT CASE (confidence >= 0.75)
+                    print(f"[PREDICT] Scan {scan.id} is CONFIDENT - directly storing structured result")
+                    prediction_result = f"URL classified as: {initial_prediction} (Confidence: {initial_confidence_str})"
+                    prediction_type = initial_prediction
+                    messages.success(request, f'Prediction completed: {initial_prediction} ({initial_confidence_str})')
+
+                    # Save to MaliciousBot table for prediction history
+                    try:
+                        MaliciousBot.objects.create(
+                            user=user if user.is_authenticated else None,
+                            url=url,
+                            prediction=prediction_result,
+                            prediction_type=initial_prediction,
+                            confidence=initial_confidence_str
+                        )
+                    except Exception as e:
+                        print(f"[PREDICT] MaliciousBot save error: {e}")
+
+                    context.update({
+                        'is_confident': True,
+                        'status': 'CONFIDENT',
+                        'prediction': prediction_result,
+                        'prediction_type': initial_prediction,
+                        'confidence': initial_confidence_str,
+                        'model_name': 'RandomForest'
+                    })
+
+                else:
+                    # UNCERTAIN CASE (confidence < 0.75) - Route to Nikhil fallback
+                    print(f"[PREDICT] Scan {scan.id} is UNCERTAIN ({initial_confidence_str} < {threshold:.2%}) - Routing to Nikhil fallback")
+                    
+                    # Invoke Nikhil deep analysis
+                    nikhil_svc = NikhilService()
+                    analysis_result = nikhil_svc.analyze_uncertain_url({
+                        'scan_id': scan.id,
+                        'url': url,
+                        'initial_prediction': initial_prediction,
+                        'initial_confidence': initial_confidence_float,
+                        'scan_status': 'UNCERTAIN'
+                    })
+
+                    # Process fallback result in SQL database
+                    fallback_processed = FallbackIntegrationService.process_fallback_result(analysis_result)
+                    print(f"[PREDICT] Fallback processing result: {fallback_processed}")
+
+                    final_classification = analysis_result.get('final_classification', 'Unknown')
+                    risk_level = analysis_result.get('risk_level', 'MEDIUM')
+                    risk_score = analysis_result.get('risk_score', 0.5)
+                    evidence_summary = analysis_result.get('evidence_summary', '')
+                    threat_indicators = analysis_result.get('threat_indicators', [])
+                    mongo_ref = analysis_result.get('mongo_document_reference')
+
+                    prediction_result = f"Deep Analysis Result: {final_classification} (Risk: {risk_level}, Score: {risk_score:.2f})"
+                    prediction_type = final_classification
+                    messages.info(request, f'Deep analysis complete: {final_classification} (Initial: {initial_prediction} @ {initial_confidence_str})')
+
+                    # Save to MaliciousBot table for prediction history
+                    try:
+                        MaliciousBot.objects.create(
+                            user=user if user.is_authenticated else None,
+                            url=url,
+                            prediction=f"Initial: {initial_prediction} ({initial_confidence_str}) → Fallback: {final_classification} (Risk: {risk_level}, Score: {risk_score:.2f})",
+                            prediction_type=final_classification,
+                            confidence=f"Initial: {initial_confidence_str}, Risk: {risk_level}"
+                        )
+                    except Exception as e:
+                        print(f"[PREDICT] MaliciousBot save error: {e}")
+
+                    context.update({
+                        'is_confident': False,
+                        'status': 'UNCERTAIN',
+                        'fallback_invoked': True,
+                        'initial_prediction': initial_prediction,
+                        'initial_confidence': initial_confidence_str,
+                        'final_classification': final_classification,
+                        'risk_level': risk_level,
+                        'risk_score': f"{risk_score:.2f}",
+                        'evidence_summary': evidence_summary,
+                        'threat_indicators': threat_indicators,
+                        'mongo_ref': mongo_ref,
+                        'prediction': prediction_result,
+                        'prediction_type': final_classification,
+                        'confidence': f"Initial: {initial_confidence_str} (Below {threshold * 100:.0f}% threshold)"
+                    })
+
+                return render(request, 'predict.html', context)
 
         except Exception as e:
             error_msg = f"Critical error in predict: {str(e)}"

@@ -123,15 +123,16 @@ def uncertain_scans(request):
         
         scan_list = []
         for scan in scans:
+            pred = scan.prediction if hasattr(scan, 'prediction') else None
             scan_list.append({
                 'scan_id': scan.id,
                 'url': scan.url.url if scan.url else None,
                 'status': scan.status,
                 'created_at': scan.created_at.isoformat() if scan.created_at else None,
                 'initial_prediction': {
-                    'predicted_class': scan.prediction.predicted_class if scan.prediction else None,
-                    'confidence': scan.prediction.confidence if scan.prediction else None,
-                    'risk_score': scan.prediction.risk_score if scan.prediction else None
+                    'predicted_class': pred.predicted_class if pred else None,
+                    'confidence': pred.confidence if pred else None,
+                    'risk_score': pred.risk_score if pred else None
                 }
             })
         

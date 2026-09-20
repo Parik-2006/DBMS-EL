@@ -29,12 +29,39 @@
             </form>
             
             {% if prediction %}
-            <div style="margin-top: 20px; padding: 15px; background-color: #f0f0f0; border-radius: 5px;">
-              <h4>Prediction Result:</h4>
-              <p><strong>URL:</strong> {{ url }}</p>
-              <p><strong>Prediction:</strong> {{ prediction }}</p>
-              {% if prediction_type %}
-              <p><strong>Type:</strong> {{ prediction_type }}</p>
+            <div style="margin-top: 20px; padding: 20px; background-color: #ffffff; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); border-left: 5px solid {% if is_confident %}#28a745{% else %}#e93f1a{% endif %};">
+              <h4 style="margin-bottom: 12px; font-weight: 700; color: #333;">Analysis Result</h4>
+              <p style="margin-bottom: 8px;"><strong>URL:</strong> <span style="word-break: break-all;">{{ url }}</span></p>
+
+              {% if is_confident %}
+              <div class="alert alert-success" style="margin-top: 10px; margin-bottom: 0;">
+                <h5 style="margin-bottom: 5px; font-weight: 700;">Classification: {{ prediction_type }}</h5>
+                <p style="margin-bottom: 0;">Status: <span class="badge badge-success">CONFIDENT</span> (Model Confidence: <strong>{{ confidence }}</strong> &ge; 75% threshold)</p>
+              </div>
+              {% else %}
+              <div class="alert alert-warning" style="margin-top: 10px; margin-bottom: 12px;">
+                <p style="margin-bottom: 4px;"><strong>Initial ML Prediction:</strong> {{ initial_prediction }} (Confidence: <strong>{{ initial_confidence }}</strong> &lt; 75% threshold &rarr; <span class="badge badge-warning">UNCERTAIN</span>)</p>
+                <p style="margin-bottom: 0;"><strong>Fallback Deep Analysis:</strong> <span class="badge badge-info">COMPLETED</span></p>
+              </div>
+
+              <div style="background: #f8f9fa; padding: 14px; border-radius: 6px; border: 1px solid #e9ecef;">
+                <h5 style="color: #e93f1a; font-weight: 700; margin-bottom: 8px;">Final Classification: {{ final_classification }}</h5>
+                <p style="margin-bottom: 6px;"><strong>Risk Level:</strong> <span class="badge badge-{% if risk_level == 'CRITICAL' %}danger{% elif risk_level == 'HIGH' %}warning{% elif risk_level == 'MEDIUM' %}secondary{% else %}success{% endif %}">{{ risk_level }}</span> (Risk Score: {{ risk_score }})</p>
+                {% if evidence_summary %}
+                <p style="margin-bottom: 6px;"><strong>Evidence Summary:</strong> {{ evidence_summary }}</p>
+                {% endif %}
+                {% if threat_indicators %}
+                <p style="margin-bottom: 4px;"><strong>Threat Indicators:</strong></p>
+                <ul style="margin-bottom: 6px; padding-left: 20px;">
+                  {% for ind in threat_indicators %}
+                  <li><code>{{ ind }}</code></li>
+                  {% endfor %}
+                </ul>
+                {% endif %}
+                {% if mongo_ref %}
+                <p style="margin-bottom: 0;"><small class="text-muted">MongoDB Reference: <code>{{ mongo_ref }}</code></small></p>
+                {% endif %}
+              </div>
               {% endif %}
             </div>
             {% endif %}
