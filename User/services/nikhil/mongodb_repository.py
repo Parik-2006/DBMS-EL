@@ -28,13 +28,17 @@ class MongoDBRepository:
         
         if self.uri:
             try:
-                # 2-second timeout for connection
-                self.client = pymongo.MongoClient(
-                    self.uri, 
-                    serverSelectionTimeoutMS=2000,
-                    connectTimeoutMS=2000,
-                    socketTimeoutMS=2000
-                )
+                client_kwargs = {
+                    "serverSelectionTimeoutMS": 4000,
+                    "connectTimeoutMS": 4000,
+                    "socketTimeoutMS": 4000,
+                }
+                try:
+                    import certifi
+                    client_kwargs["tlsCAFile"] = certifi.where()
+                except ImportError:
+                    pass
+                self.client = pymongo.MongoClient(self.uri, **client_kwargs)
                 # Test connection
                 self.client.admin.command('ping')
                 self.collection = self.client[self.db_name][self.collection_name]
