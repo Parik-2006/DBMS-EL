@@ -85,10 +85,23 @@ class EvidenceNormalizer:
                 "title": raw_evidence.get("title", ""),
             }
         elif collector_name == "threat_intelligence":
+            sources = raw_evidence.get("sources", {})
+            summary = raw_evidence.get("summary", {})
             metadata = {
                 "provider": raw_evidence.get("provider"),
                 "reputation": raw_evidence.get("reputation", "UNKNOWN"),
                 "local_correlation": raw_evidence.get("local_correlation", {}),
+                "summary": summary,
+                "threatfox_status": sources.get("threatfox", {}).get("status", "NOT_RUN"),
+                "threatfox_hits": sources.get("threatfox", {}).get("hits", 0),
+                "urlhaus_status": sources.get("urlhaus", {}).get("status", "NOT_RUN"),
+                "urlhaus_hits": sources.get("urlhaus", {}).get("hits", 0),
+                "abuseipdb_status": sources.get("abuseipdb", {}).get("status", "NOT_RUN"),
+                "abuseipdb_score": sources.get("abuseipdb", {}).get("abuse_confidence_score", 0),
+                "abuseipdb_reports": sources.get("abuseipdb", {}).get("total_reports", 0),
+                "trusted_domain_category": sources.get("trusted_domain", {}).get("category"),
+                "trusted_domain_known": sources.get("trusted_domain", {}).get("is_known", False),
+                "ui_summary": summary.get("threat_intel_ui_summary", "")
             }
         elif collector_name == "prompt_injection":
             metadata = {
@@ -176,6 +189,23 @@ class EvidenceNormalizer:
             "threat_intelligence": {
                 "status": threat_norm.get("status", "NOT_RUN"),
                 "reputation": threat_norm.get("metadata", {}).get("reputation", "UNKNOWN"),
+                "threatfox": {
+                    "status": threat_norm.get("metadata", {}).get("threatfox_status", "NOT_RUN"),
+                    "hits": threat_norm.get("metadata", {}).get("threatfox_hits", 0),
+                },
+                "urlhaus": {
+                    "status": threat_norm.get("metadata", {}).get("urlhaus_status", "NOT_RUN"),
+                    "hits": threat_norm.get("metadata", {}).get("urlhaus_hits", 0),
+                },
+                "abuseipdb": {
+                    "status": threat_norm.get("metadata", {}).get("abuseipdb_status", "NOT_RUN"),
+                    "abuse_confidence_score": threat_norm.get("metadata", {}).get("abuseipdb_score", 0),
+                    "reports": threat_norm.get("metadata", {}).get("abuseipdb_reports", 0),
+                },
+                "trusted_domain": {
+                    "category": threat_norm.get("metadata", {}).get("trusted_domain_category"),
+                    "verified": threat_norm.get("metadata", {}).get("trusted_domain_known", False),
+                },
                 "known_indicators": threat_norm.get("indicators", [])[:5],
             },
             "prompt_injection": {

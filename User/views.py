@@ -680,6 +680,7 @@ def predict(request):
                         'module_statuses': module_statuses,
                         'evidence_breakdown': evidence_breakdown,
                         'ai_display': ai_display,
+                        'threat_intel_display': analysis_result.get('threat_intel_display', {}),
                         'prediction': prediction_result,
                         'prediction_type': final_classification,
                         'confidence': f"Initial: {initial_confidence_str} (Below {threshold * 100:.0f}% threshold)"
@@ -715,14 +716,40 @@ def data(request):
         try:
             user_data = MaliciousBot.objects.filter(user=request.user).order_by('-timestamp')
             data_list = []
+            mongo_repo = None
             for item in user_data:
                 try:
+                    ti_info = None
+                    if item.prediction and ('Fallback' in item.prediction or 'Deep Analysis' in item.prediction):
+                        try:
+                            from User.models import Scan
+                            scan = Scan.objects.filter(url__url=item.url).order_by('-id').first()
+                            if scan:
+                                if mongo_repo is None:
+                                    from User.services.nikhil.mongodb_repository import MongoDBRepository
+                                    mongo_repo = MongoDBRepository()
+                                evidence_doc = mongo_repo.get_evidence(scan.id)
+                                if evidence_doc and 'threat_intelligence' in evidence_doc:
+                                    ti_doc = evidence_doc['threat_intelligence']
+                                    sources = ti_doc.get('sources', {})
+                                    ti_info = {
+                                        'threatfox': sources.get('threatfox', {}).get('status', 'NO_MATCH'),
+                                        'urlhaus': sources.get('urlhaus', {}).get('status', 'NO_MATCH'),
+                                        'abuseipdb': f"{sources.get('abuseipdb', {}).get('abuse_confidence_score', 0)}% abuse confidence",
+                                        'local_sql': f"{sources.get('local_sql', {}).get('known_malicious_in_domain', 0)} historical malicious" if sources.get('local_sql', {}).get('known_malicious_in_domain', 0) > 0 else "No historical indicator",
+                                        'trusted_domain': sources.get('trusted_domain', {}).get('category') or ("Verified" if sources.get('trusted_domain', {}).get('is_known') else "Not Listed")
+                                    }
+                        except Exception as e:
+                            logger.debug(f"Could not load TI history details for {item.url}: {e}")
+
                     data_list.append({
+                        'id': item.id,
                         'url': item.url,
                         'prediction': item.prediction,
                         'prediction_type': item.prediction_type,
                         'confidence': item.confidence,
-                        'timestamp': item.timestamp.strftime('%Y-%m-%d %H:%M:%S') if item.timestamp else 'N/A'
+                        'timestamp': item.timestamp.strftime('%Y-%m-%d %H:%M:%S') if item.timestamp else 'N/A',
+                        'threat_intel': ti_info
                     })
                 except Exception as e:
                     print(f"Error processing data item: {str(e)}")

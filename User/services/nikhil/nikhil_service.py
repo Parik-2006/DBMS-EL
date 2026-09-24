@@ -108,6 +108,26 @@ class NikhilService:
             "reasoning_summary": ai_data.get("reasoning_summary", ""),
         }
 
+        # 5b. Build Threat Intel display info
+        ti_data = evidence_data.get("threat_intelligence", {})
+        ti_summary = ti_data.get("summary", {})
+        ti_sources = ti_data.get("sources", {})
+        threat_intel_display = {
+            "status": ti_data.get("status", "UNAVAILABLE"),
+            "ui_summary": ti_summary.get("threat_intel_ui_summary", "Local SQL correlation active"),
+            "positive_hits": ti_summary.get("positive_hits", 0),
+            "sources_available": ti_summary.get("sources_available", 0),
+            "threatfox": ti_sources.get("threatfox", {}).get("status", "NOT_RUN"),
+            "threatfox_hits": ti_sources.get("threatfox", {}).get("hits", 0),
+            "urlhaus": ti_sources.get("urlhaus", {}).get("status", "NOT_RUN"),
+            "urlhaus_hits": ti_sources.get("urlhaus", {}).get("hits", 0),
+            "abuseipdb": ti_sources.get("abuseipdb", {}).get("status", "NOT_RUN"),
+            "abuseipdb_score": ti_sources.get("abuseipdb", {}).get("abuse_confidence_score", 0),
+            "local_sql_scans": ti_sources.get("local_sql", {}).get("previous_scans_count", 0),
+            "local_sql_malicious": ti_sources.get("local_sql", {}).get("known_malicious_in_domain", 0),
+            "trusted_domain": ti_sources.get("trusted_domain", {}).get("category") if ti_sources.get("trusted_domain", {}).get("is_known") else "Not Listed",
+        }
+
         # 6. Assemble PARI contract payload
         result = {
             "scan_id": scan_id,
@@ -124,6 +144,7 @@ class NikhilService:
             "corroboration": final_result.get("corroboration", {}),
             "module_statuses": module_statuses,
             "ai_display": ai_display,
+            "threat_intel_display": threat_intel_display,
         }
         
         logger.info(f"Fallback complete for Scan {scan_id}: Final {result['final_classification']} (Risk: {result['risk_level']})")

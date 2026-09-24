@@ -287,12 +287,15 @@ class FinalClassifier:
             breakdown["visual"].append(f"Visual module: {vis_status} ({visual.get('error') or 'Unavailable'})")
 
         # -------------------------------------------------------------------
-        # Family 4: Threat Intelligence / SQL Correlation
+        # Family 4: Threat Intelligence (ThreatFox, URLhaus, AbuseIPDB, SQL)
         # -------------------------------------------------------------------
         ti_status = threat_intel.get("status")
-        local_correl = threat_intel.get("local_correlation", {})
+        ti_sources = threat_intel.get("sources", {})
+        ti_summary = threat_intel.get("summary", {})
+        local_correl = threat_intel.get("local_correlation", {}) or ti_sources.get("local_sql", {})
         known_malicious = local_correl.get("known_malicious_in_domain", 0)
 
+        # 4a. Local SQL correlation
         if known_malicious > 0:
             scores["Phishing"] += 2.0
             scores["Malware"] += 2.0
@@ -303,11 +306,78 @@ class FinalClassifier:
             )
             threat_indicators.append("CORRELATION:HISTORICAL_MALICIOUS_DOMAIN")
 
+        # 4b. ThreatFox Community API Evidence
+        tf_data = ti_sources.get("threatfox", {})
+        if tf_data.get("status") == "SUCCESS" and tf_data.get("hits", 0) > 0:
+            threat_types = tf_data.get("threat_types", [])
+            is_phishing = any("phishing" in str(t).lower() or "credential" in str(t).lower() for t in threat_types)
+            if is_phishing:
+                scores["Phishing"] += 3.0
+                family_contributions["Phishing"].add("THREAT_INTEL")
+                breakdown["threat_intelligence"].append(
+                    f"ThreatFox: Malicious phishing IOC match found (+3.0 Phishing)"
+                )
+                threat_indicators.append("THREAT_INTEL:THREATFOX_PHISHING_IOC")
+            else:
+                scores["Malware"] += 3.0
+                family_contributions["Malware"].add("THREAT_INTEL")
+                breakdown["threat_intelligence"].append(
+                    f"ThreatFox: Known malware IOC match ({', '.join(tf_data.get('malware_families', [])[:2]) or 'IOC'}) (+3.0 Malware)"
+                )
+                threat_indicators.append("THREAT_INTEL:THREATFOX_MALWARE_IOC")
+
+        # 4c. URLhaus Community API Evidence
+        uh_data = ti_sources.get("urlhaus", {})
+        if uh_data.get("status") == "SUCCESS" and uh_data.get("hits", 0) > 0:
+            scores["Malware"] += 3.5
+            family_contributions["Malware"].add("THREAT_INTEL")
+            threat_name = uh_data.get("threat") or "malware_download"
+            breakdown["threat_intelligence"].append(
+                f"URLhaus: Active malware distribution infrastructure detected ({threat_name}) (+3.5 Malware)"
+            )
+            threat_indicators.append("THREAT_INTEL:URLHAUS_MALWARE_URL")
+
+        # 4d. AbuseIPDB IP Reputation Evidence
+        aip_data = ti_sources.get("abuseipdb", {})
+        if aip_data.get("status") == "SUCCESS":
+            abuse_score = aip_data.get("abuse_confidence_score", 0)
+            if abuse_score >= 75:
+                scores["Malware"] += 2.0
+                scores["Phishing"] += 1.5
+                family_contributions["Malware"].add("THREAT_INTEL")
+                family_contributions["Phishing"].add("THREAT_INTEL")
+                breakdown["threat_intelligence"].append(
+                    f"AbuseIPDB: High abuse confidence score ({abuse_score}%) (+2.0 Malware, +1.5 Phishing)"
+                )
+                threat_indicators.append(f"THREAT_INTEL:ABUSEIPDB_SCORE_{abuse_score}")
+            elif abuse_score >= 25:
+                scores["Malware"] += 1.0
+                scores["Phishing"] += 1.0
+                family_contributions["Malware"].add("THREAT_INTEL")
+                breakdown["threat_intelligence"].append(
+                    f"AbuseIPDB: Moderate abuse confidence score ({abuse_score}%) (+1.0)"
+                )
+                threat_indicators.append(f"THREAT_INTEL:ABUSEIPDB_SCORE_{abuse_score}")
+            elif abuse_score == 0 and not ti_summary.get("known_malicious_ioc") and not ti_summary.get("known_malware_url"):
+                scores["Benign"] += 0.5
+                breakdown["threat_intelligence"].append(
+                    f"AbuseIPDB: Clean reputation (0% abuse score) (+0.5 Benign)"
+                )
+
         for ind in threat_intel.get("external_indicators", []):
-            threat_indicators.append(f"THREAT_INTEL:{ind}")
+            if f"THREAT_INTEL:{ind}" not in threat_indicators:
+                threat_indicators.append(f"THREAT_INTEL:{ind}")
+
+        for ind in threat_intel.get("indicators", []):
+            if ind not in threat_indicators:
+                threat_indicators.append(ind)
 
         if ti_status == "UNAVAILABLE":
-            breakdown["threat_intelligence"].append("External threat intelligence provider UNAVAILABLE (No API key)")
+            breakdown["threat_intelligence"].append("External threat intelligence provider UNAVAILABLE (Local SQL/Domain correlation active)")
+        elif ti_status == "RATE_LIMITED":
+            breakdown["threat_intelligence"].append("External threat intelligence RATE LIMITED (Local SQL/Domain correlation active)")
+        elif ti_status == "SUCCESS" and ti_summary.get("positive_hits", 0) == 0:
+            breakdown["threat_intelligence"].append("ThreatFox & URLhaus: Clean (NO_MATCH - no known malicious IOCs)")
 
         # -------------------------------------------------------------------
         # Family 5: Prompt-Injection Detection
