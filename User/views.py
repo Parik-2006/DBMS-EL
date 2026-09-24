@@ -646,6 +646,7 @@ def predict(request):
                     corroboration = analysis_result.get('corroboration', {})
                     module_statuses = analysis_result.get('module_statuses', {})
                     evidence_breakdown = analysis_result.get('evidence_breakdown', {})
+                    ai_display = analysis_result.get('ai_display', {})
 
                     prediction_result = f"Deep Analysis Result: {final_classification} (Risk: {risk_level}, Score: {risk_score:.2f})"
                     prediction_type = final_classification
@@ -678,6 +679,7 @@ def predict(request):
                         'corroboration': corroboration,
                         'module_statuses': module_statuses,
                         'evidence_breakdown': evidence_breakdown,
+                        'ai_display': ai_display,
                         'prediction': prediction_result,
                         'prediction_type': final_classification,
                         'confidence': f"Initial: {initial_confidence_str} (Below {threshold * 100:.0f}% threshold)"

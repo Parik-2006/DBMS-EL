@@ -2,68 +2,334 @@
 {% block content %}
 {% load static %}
 
+<style>
+  .history-container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 20px 15px;
+  }
+  .history-header {
+    margin-bottom: 20px;
+  }
+  .history-header h2 {
+    font-weight: 700;
+    color: #1a202c;
+    margin-bottom: 5px;
+  }
+  .history-header p {
+    color: #718096;
+    font-size: 14px;
+  }
+
+  /* Search and filters */
+  .search-filter-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 18px;
+    align-items: center;
+  }
+  .search-input {
+    flex: 1;
+    min-width: 250px;
+    padding: 8px 14px;
+    border: 1px solid #cbd5e0;
+    border-radius: 6px;
+    font-size: 14px;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+  .search-input:focus {
+    border-color: #4299e1;
+    box-shadow: 0 0 0 2px rgba(66,153,225,0.15);
+  }
+  .filter-btn {
+    padding: 6px 14px;
+    border: 1px solid #cbd5e0;
+    border-radius: 20px;
+    background: white;
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.2s;
+    color: #4a5568;
+  }
+  .filter-btn:hover {
+    background: #edf2f7;
+  }
+  .filter-btn.active {
+    background: #4299e1;
+    color: white;
+    border-color: #4299e1;
+  }
+
+  /* Table */
+  .history-table-wrapper {
+    width: 100%;
+    overflow-x: auto;
+    border-radius: 8px;
+    box-shadow: 0 1px 8px rgba(0,0,0,0.07);
+    background: white;
+  }
+  .history-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14px;
+  }
+  .history-table thead th {
+    background: #f7fafc;
+    color: #4a5568;
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 12px;
+    letter-spacing: 0.5px;
+    padding: 12px 14px;
+    border-bottom: 2px solid #e2e8f0;
+    white-space: nowrap;
+  }
+  .history-table tbody tr {
+    transition: background 0.15s;
+    border-bottom: 1px solid #edf2f7;
+  }
+  .history-table tbody tr:hover {
+    background: #f7fafc;
+  }
+  .history-table tbody td {
+    padding: 10px 14px;
+    color: #2d3748;
+    vertical-align: middle;
+  }
+
+  /* URL column */
+  .url-cell {
+    max-width: 320px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: monospace;
+    font-size: 13px;
+    color: #2b6cb0;
+  }
+  .url-cell:hover {
+    white-space: normal;
+    word-break: break-all;
+  }
+
+  /* Type badges */
+  .badge-type {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+  }
+  .badge-benign {
+    background: #c6f6d5;
+    color: #22543d;
+  }
+  .badge-phishing {
+    background: #fed7d7;
+    color: #9b2c2c;
+  }
+  .badge-malware {
+    background: #fed7d7;
+    color: #742a2a;
+  }
+  .badge-defacement {
+    background: #feebc8;
+    color: #7b341e;
+  }
+  .badge-unknown {
+    background: #e2e8f0;
+    color: #4a5568;
+  }
+
+  /* Risk badges */
+  .risk-low { color: #38a169; font-weight: 600; }
+  .risk-medium { color: #dd6b20; font-weight: 600; }
+  .risk-high { color: #e53e3e; font-weight: 600; }
+  .risk-critical { color: #9b2c2c; font-weight: 700; }
+
+  /* Empty state */
+  .empty-state {
+    text-align: center;
+    padding: 50px 20px;
+    color: #a0aec0;
+  }
+  .empty-state h4 {
+    color: #4a5568;
+    margin-bottom: 10px;
+  }
+
+  /* View details button */
+  .btn-details {
+    padding: 4px 10px;
+    font-size: 12px;
+    border: 1px solid #4299e1;
+    color: #4299e1;
+    background: transparent;
+    border-radius: 4px;
+    cursor: pointer;
+    text-decoration: none;
+    transition: all 0.15s;
+  }
+  .btn-details:hover {
+    background: #4299e1;
+    color: white;
+    text-decoration: none;
+  }
+
+  /* Responsive */
+  @media (max-width: 768px) {
+    .search-filter-bar {
+      flex-direction: column;
+      align-items: stretch;
+    }
+    .search-input {
+      min-width: auto;
+    }
+    .url-cell {
+      max-width: 180px;
+    }
+  }
+</style>
 
 <div class="body_bg layout_padding">
- <!-- contact section -->
+  <section class="contact_section">
+    <div class="history-container">
+      <div class="history-header">
+        <h2>Prediction History</h2>
+        <p>Review your past URL security analyses and their results.</p>
+      </div>
 
- <section class="contact_section">
-    <div class="container">
-      <div class="heading_container">
-        <h2>
-          Predict Malicious Bot
-        </h2>
+      <!-- Search and Filters -->
+      <div class="search-filter-bar">
+        <input type="text" id="searchInput" class="search-input" placeholder="Search URL..." oninput="filterTable()">
+        <button class="filter-btn active" data-filter="all" onclick="setFilter(this, 'all')">All</button>
+        <button class="filter-btn" data-filter="Benign" onclick="setFilter(this, 'Benign')">Benign</button>
+        <button class="filter-btn" data-filter="Phishing" onclick="setFilter(this, 'Phishing')">Phishing</button>
+        <button class="filter-btn" data-filter="Malware" onclick="setFilter(this, 'Malware')">Malware</button>
+        <button class="filter-btn" data-filter="Defacement" onclick="setFilter(this, 'Defacement')">Defacement</button>
+        <button class="filter-btn" data-filter="Unknown" onclick="setFilter(this, 'Unknown')">Unknown</button>
       </div>
-    </div>
-    <div class="container contact_bg layout_padding2-top">
-      <div class="row">
-        <div class="col-md-6">
-          <div class="contact_form ">
-            <h3>Your Prediction History</h3>
-            {% if data and data|length > 0 %}
-            <div style="overflow-x:auto;">
-              <table class="table table-bordered table-striped" style="background:white;">
-                <thead>
-                  <tr>
-                    <th>#</th>
-                    <th>URL</th>
-                    <th>Prediction</th>
-                    <th>Type</th>
-                    <th>Confidence</th>
-                    <th>Timestamp</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {% for item in data %}
-                  <tr>
-                    <td>{{ forloop.counter }}</td>
-                    <td style="word-break:break-all;">{{ item.url }}</td>
-                    <td>{{ item.prediction }}</td>
-                    <td>{{ item.prediction_type }}</td>
-                    <td>{{ item.confidence }}</td>
-                    <td>{{ item.timestamp }}</td>
-                  </tr>
-                  {% endfor %}
-                </tbody>
-              </table>
-            </div>
-            {% else %}
-              <p>No prediction history found. Make a prediction to get started!</p>
-            {% endif %}
-          </div>
-        </div>
-        <div class="col-md-6">
-          <div class="img-box">
-            <img src="{% static 'images/contact-img.jpg' %}" alt="">
-          </div>
-        </div>
+
+      {% if data and data|length > 0 %}
+      <div class="history-table-wrapper">
+        <table class="history-table" id="historyTable">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>URL</th>
+              <th>Initial ML</th>
+              <th>Final Result</th>
+              <th>Risk</th>
+              <th>Confidence</th>
+              <th>Status</th>
+              <th>Date</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="historyBody">
+            {% for item in data %}
+            <tr data-type="{{ item.prediction_type|default:'Unknown' }}" data-url="{{ item.url|lower }}">
+              <td>{{ forloop.counter }}</td>
+              <td>
+                <span class="url-cell" title="{{ item.url }}">{{ item.url }}</span>
+              </td>
+              <td>
+                {% if item.prediction and 'Initial:' in item.prediction %}
+                  <span class="text-muted">{{ item.prediction|truncatechars:40 }}</span>
+                {% else %}
+                  <span>{{ item.prediction_type|default:'—' }}</span>
+                {% endif %}
+              </td>
+              <td>
+                {% with ptype=item.prediction_type|default:"Unknown" %}
+                <span class="badge-type
+                  {% if ptype == 'Benign' %}badge-benign
+                  {% elif ptype == 'Phishing' %}badge-phishing
+                  {% elif ptype == 'Malware' %}badge-malware
+                  {% elif ptype == 'Defacement' %}badge-defacement
+                  {% else %}badge-unknown{% endif %}">
+                  {{ ptype }}
+                </span>
+                {% endwith %}
+              </td>
+              <td>
+                {% if 'CRITICAL' in item.confidence|default:'' %}
+                  <span class="risk-critical">CRITICAL</span>
+                {% elif 'HIGH' in item.confidence|default:'' %}
+                  <span class="risk-high">HIGH</span>
+                {% elif 'MEDIUM' in item.confidence|default:'' %}
+                  <span class="risk-medium">MEDIUM</span>
+                {% elif 'LOW' in item.confidence|default:'' %}
+                  <span class="risk-low">LOW</span>
+                {% else %}
+                  <span class="text-muted">—</span>
+                {% endif %}
+              </td>
+              <td>{{ item.confidence|default:'—' }}</td>
+              <td>
+                {% if 'Fallback' in item.prediction|default:'' or '→' in item.prediction|default:'' %}
+                  <span class="badge badge-info" style="font-size:11px;">DEEP ANALYSIS</span>
+                {% else %}
+                  <span class="badge badge-success" style="font-size:11px;">CONFIDENT</span>
+                {% endif %}
+              </td>
+              <td style="white-space:nowrap;">{{ item.timestamp }}</td>
+              <td>
+                <button class="btn-details" onclick="toggleDetails(this)" title="View details">Details</button>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
       </div>
+      {% else %}
+      <div class="empty-state">
+        <h4>No Prediction History</h4>
+        <p>Make a prediction to get started! Go to the <a href="/predict">Predict</a> page.</p>
+      </div>
+      {% endif %}
     </div>
   </section>
-
-  <!-- end contact section -->
-
 </div>
 
+<script>
+  var currentFilter = 'all';
 
+  function setFilter(btn, filter) {
+    document.querySelectorAll('.filter-btn').forEach(function(b) { b.classList.remove('active'); });
+    btn.classList.add('active');
+    currentFilter = filter;
+    filterTable();
+  }
+
+  function filterTable() {
+    var search = document.getElementById('searchInput').value.toLowerCase();
+    var rows = document.querySelectorAll('#historyBody tr');
+    rows.forEach(function(row) {
+      var url = (row.getAttribute('data-url') || '').toLowerCase();
+      var type = row.getAttribute('data-type') || '';
+      var matchesSearch = !search || url.indexOf(search) !== -1;
+      var matchesFilter = currentFilter === 'all' || type === currentFilter;
+      row.style.display = (matchesSearch && matchesFilter) ? '' : 'none';
+    });
+  }
+
+  function toggleDetails(btn) {
+    var row = btn.closest('tr');
+    var cells = row.querySelectorAll('td');
+    var urlCell = cells[1].querySelector('.url-cell');
+    if (urlCell) {
+      if (urlCell.style.whiteSpace === 'normal') {
+        urlCell.style.whiteSpace = 'nowrap';
+      } else {
+        urlCell.style.whiteSpace = 'normal';
+        urlCell.style.wordBreak = 'break-all';
+      }
+    }
+  }
+</script>
 
 {% endblock %}

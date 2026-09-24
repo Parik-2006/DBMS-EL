@@ -54,9 +54,13 @@ class NikhilService:
         
         logger.info(f"Initiating evidence-driven fallback for Scan {scan_id}: {url}")
         
-        # 1. Orchestrate multi-module evidence collection
+        # 1. Orchestrate multi-module evidence collection (incl. AI gatekeeper + providers)
         orchestrator = self._get_orchestrator()
-        evidence_data, mongo_doc_id = orchestrator.perform_deep_analysis(scan_id, url)
+        evidence_data, mongo_doc_id = orchestrator.perform_deep_analysis(
+            scan_id, url,
+            initial_prediction=initial_prediction,
+            initial_confidence=initial_confidence
+        )
         
         # 2. Perform multi-family evidence corroboration & rule-based classification
         classifier = self._get_classifier()
@@ -68,7 +72,9 @@ class NikhilService:
             evidence_data["final_analysis"] = {
                 "classification": final_result["final_classification"],
                 "risk_level": final_result["risk_level"],
-                "risk_score": final_result["risk_score"]
+                "risk_score": final_result["risk_score"],
+                "evidence_summary": final_result.get("evidence_summary", ""),
+                "limitations": []
             }
             mongo_repo = self._get_mongo_repo()
             mongo_repo.store_evidence(evidence_data)
@@ -76,16 +82,33 @@ class NikhilService:
             logger.warning(f"Failed to update MongoDB with final classification: {e}")
 
         # 4. Extract module statuses for UI display
+        ai_data = evidence_data.get("ai_analysis", {})
+        ai_status = ai_data.get("status", "NOT_RUN")
+        
         module_statuses = {
             "webpage": evidence_data.get("webpage", {}).get("status", "UNKNOWN"),
             "network": evidence_data.get("network", {}).get("status", "UNKNOWN"),
             "visual": evidence_data.get("visual", {}).get("status", "UNAVAILABLE"),
             "threat_intelligence": evidence_data.get("threat_intelligence", {}).get("status", "UNAVAILABLE"),
             "prompt_injection": "DETECTED" if evidence_data.get("prompt_injection", {}).get("prompt_injection_detected") else "NOT_DETECTED",
-            "ai": evidence_data.get("ai_analysis", {}).get("status", "MOCK")
+            "ai": ai_status
         }
 
-        # 5. Assemble PARI contract payload
+        # 5. Build AI display info
+        ai_display = {
+            "status": ai_status,
+            "provider": ai_data.get("provider"),
+            "model": ai_data.get("model"),
+            "assessment": ai_data.get("assessment"),
+            "ai_required": ai_data.get("ai_required", False),
+            "ai_called": ai_data.get("ai_called", False),
+            "provider_attempts": ai_data.get("provider_attempts", 0),
+            "gatekeeper_reason": ai_data.get("gatekeeper", {}).get("reason", ""),
+            "failover_reason": ai_data.get("failover_reason"),
+            "reasoning_summary": ai_data.get("reasoning_summary", ""),
+        }
+
+        # 6. Assemble PARI contract payload
         result = {
             "scan_id": scan_id,
             "analysis_status": "COMPLETED",
@@ -99,7 +122,8 @@ class NikhilService:
             "original_confidence": initial_confidence,
             "evidence_breakdown": final_result.get("evidence_breakdown", {}),
             "corroboration": final_result.get("corroboration", {}),
-            "module_statuses": module_statuses
+            "module_statuses": module_statuses,
+            "ai_display": ai_display,
         }
         
         logger.info(f"Fallback complete for Scan {scan_id}: Final {result['final_classification']} (Risk: {result['risk_level']})")

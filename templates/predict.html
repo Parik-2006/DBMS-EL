@@ -410,7 +410,30 @@
                   </div>
                   <div class="col-sm-6 module-item">
                     <strong>AI Analysis:</strong>
-                    <span class="badge badge-secondary" title="Real LLM excluded in this phase">MOCK / NOT AVAILABLE</span>
+                    {% if ai_display.status == 'SUCCESS' %}
+                    <span class="badge badge-success">SUCCESS</span>
+                    <small class="d-block text-muted mt-1">
+                      Provider: {{ ai_display.provider }} | Model: {{ ai_display.model }}
+                      {% if ai_display.assessment %} | Assessment: {{ ai_display.assessment }}{% endif %}
+                    </small>
+                    {% elif ai_display.status == 'NOT_RUN' %}
+                    <span class="badge badge-info">NOT RUN</span>
+                    <small class="d-block text-muted mt-1">{{ ai_display.gatekeeper_reason|truncatechars:100 }}</small>
+                    {% elif ai_display.status == 'RATE_LIMITED' %}
+                    <span class="badge badge-warning">RATE LIMITED</span>
+                    {% elif ai_display.status == 'QUOTA_EXCEEDED' %}
+                    <span class="badge badge-warning">QUOTA EXCEEDED</span>
+                    {% elif ai_display.status == 'UNAVAILABLE' %}
+                    <span class="badge badge-secondary">UNAVAILABLE</span>
+                    <small class="d-block text-muted mt-1">
+                      {{ ai_display.failover_reason|default:"No AI providers available" }}
+                      — Local deterministic analysis continued
+                    </small>
+                    {% elif module_statuses.ai == 'MOCK' %}
+                    <span class="badge badge-secondary">NOT AVAILABLE</span>
+                    {% else %}
+                    <span class="badge badge-secondary">{{ ai_display.status|default:module_statuses.ai|default:'NOT AVAILABLE' }}</span>
+                    {% endif %}
                   </div>
                 </div>
               </div>
