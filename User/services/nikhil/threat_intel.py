@@ -153,20 +153,30 @@ class ThreatIntelService:
         # -------------------------------------------------------------
         try:
             td_data = self.trusted_domains.lookup_domain(url)
+            evidence["trusted_domain"] = td_data
             evidence["sources"]["trusted_domain"] = {
                 "status": "SUCCESS" if td_data.get("is_known") else "NO_MATCH",
                 "is_known": td_data.get("is_known", False),
                 "category": td_data.get("category"),
+                "organization": td_data.get("organization"),
+                "verified": td_data.get("verified", False),
                 "confidence": td_data.get("confidence", 0.0),
                 "evidence_type": td_data.get("evidence_type")
             }
             if td_data.get("is_known"):
                 evidence["evidence"].append(
-                    f"Trusted Domain: Category {td_data.get('category')} (confidence {td_data.get('confidence', 0.0)})"
+                    f"Trusted Domain: Category {td_data.get('category')} (domain: {td_data.get('domain')}, verified: {td_data.get('verified', False)})"
                 )
         except Exception as e:
             logger.warning(f"Trusted domain intelligence exception: {e}")
             evidence["sources"]["trusted_domain"]["status"] = "ERROR"
+            evidence["trusted_domain"] = {"is_known": False, "verified": False, "evidence_type": "ERROR"}
+
+        try:
+            evidence["url_features"] = self.trusted_domains.extract_url_features(url)
+        except Exception as e:
+            logger.warning(f"URL features extraction exception: {e}")
+            evidence["url_features"] = {"error": str(e)}
 
         # -------------------------------------------------------------
         # 3. Check Free-Only Policy & Commercial Provider Guard
@@ -356,7 +366,7 @@ class ThreatIntelService:
             if positive_hits > 0:
                 ui_summary = f"SUCCESS · {sources_available} sources checked · {positive_hits} malicious indicator(s) found"
             else:
-                ui_summary = f"SUCCESS · {sources_available} sources checked · No known malicious indicators found"
+                ui_summary = f"SUCCESS · {sources_available} sources checked · No malicious indicators found in checked sources"
         elif overall_status == "PARTIAL":
             statuses = [f"{n}: {st}" for n, st, _ in ext_sources if st not in ("NOT_RUN", "SKIPPED_PRIVATE_IP")]
             ui_summary = f"PARTIAL · {', '.join(statuses)}"

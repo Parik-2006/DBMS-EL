@@ -160,7 +160,7 @@ Stored under `threat_intelligence`:
     "positive_hits": 0,
     "sources_available": 3,
     "sources_failed": 0,
-    "threat_intel_ui_summary": "SUCCESS · 3 sources checked · No known malicious indicators found"
+    "threat_intel_ui_summary": "SUCCESS · 3 sources checked · No malicious indicators found in checked sources"
   }
 }
 ```
@@ -177,7 +177,7 @@ Meaningful threat indicators detected during fallback are persisted and linked t
 
 - **Stage 2 (Predict Page)**:
   - Displays dynamic badges (`SUCCESS`, `HITS FOUND (N)`, `PARTIAL`, `RATE LIMITED`, `UNAVAILABLE`).
-  - Sub-label displays concise summary: e.g. `SUCCESS · 3 sources checked · No known malicious indicators found`.
+  - Sub-label displays concise summary: e.g. `SUCCESS · 3 sources checked · No malicious indicators found in checked sources`.
 - **Stage 3 (Evidence Corroboration)**:
   - Exposes compact badge breakdown: ThreatFox, URLhaus, AbuseIPDB, Local SQL, and Trusted Domain.
 - **History View (`data.html`)**:

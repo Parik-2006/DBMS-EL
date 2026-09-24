@@ -68,7 +68,7 @@ class AIGatekeeper:
             available_families += 1
         if visual.get("status") == "SUCCESS":
             available_families += 1
-        if threat_intel.get("status") not in (None, "NOT_RUN"):
+        if threat_intel.get("status") in ("SUCCESS", "PARTIAL"):
             available_families += 1
 
         # Strong malicious signals — no AI needed
@@ -81,7 +81,7 @@ class AIGatekeeper:
         if strong_count >= 2:
             return {
                 "ai_required": False,
-                "reason": f"Strong deterministic malicious evidence ({strong_count} indicators) — AI not needed",
+                "reason": "Deterministic evidence sufficient — AI not required",
                 "priority": "LOW",
                 "triggers": []
             }
@@ -96,7 +96,7 @@ class AIGatekeeper:
         if is_clean_webpage and has_valid_ssl and no_prompt_injection and available_families >= 2 and not ml_is_malicious:
             return {
                 "ai_required": False,
-                "reason": "Clean webpage + valid SSL + no injection — deterministic evidence sufficient",
+                "reason": "Deterministic evidence sufficient — AI not required",
                 "priority": "LOW",
                 "triggers": []
             }
@@ -120,11 +120,6 @@ class AIGatekeeper:
                 triggers.append("AMBIGUOUS_PROMPT_INJECTION")
                 priority = "HIGH"
 
-        # Insufficient evidence — would result in Unknown
-        if available_families < 2 and wp_status == "SUCCESS" and len(wp_indicators) > 0:
-            triggers.append("INSUFFICIENT_CORROBORATION")
-            priority = "MEDIUM"
-
         # Single weak indicator — AI interpretation could help
         if strong_count == 1 and available_families < 3:
             triggers.append("SINGLE_WEAK_INDICATOR")
@@ -137,10 +132,51 @@ class AIGatekeeper:
             triggers.append("THREAT_INTEL_WEBPAGE_CONFLICT")
             priority = "HIGH"
 
+        # ---- Preliminary deterministic classification evaluation ----
+        # If deterministic evidence alone produces Unknown or insufficient corroboration (<2 families),
+        # deterministic evidence is NOT sufficient and AI is eligible to assist.
+        try:
+            from User.services.nikhil.final_classifier import FinalClassifier
+            det_evidence = dict(evidence_data)
+            det_evidence["ai_analysis"] = {"status": "NOT_RUN"}
+            det_result = FinalClassifier.classify_with_corroboration(
+                det_evidence,
+                initial_prediction=initial_prediction,
+                initial_confidence=initial_confidence
+            )
+            det_class = det_result.get("final_classification")
+            corroboration = det_result.get("corroboration", {})
+            independent_count = corroboration.get("independent_families", 0)
+            has_conflict = corroboration.get("conflicting", False)
+
+            if has_conflict:
+                if "EVIDENCE_CONFLICT" not in triggers:
+                    triggers.append("EVIDENCE_CONFLICT")
+                priority = "HIGH"
+            elif det_class == "Unknown" or independent_count < 2:
+                if "INSUFFICIENT_CORROBORATION" not in triggers:
+                    triggers.append("INSUFFICIENT_CORROBORATION")
+                if priority != "HIGH":
+                    priority = "MEDIUM"
+            elif det_class in ("Benign", "Phishing", "Malware", "Defacement") and independent_count >= 2 and not has_conflict:
+                # Deterministic evidence is genuinely corroborated across 2+ independent families!
+                # If only ML_WEBPAGE_CONFLICT was flagged, independent corroboration already resolved it.
+                if not triggers or triggers == ["ML_WEBPAGE_CONFLICT"]:
+                    return {
+                        "ai_required": False,
+                        "reason": "Deterministic evidence sufficient — AI not required",
+                        "priority": "LOW",
+                        "triggers": []
+                    }
+        except Exception as e:
+            logger.warning(f"Preliminary classifier evaluation error in gatekeeper: {e}")
+            if available_families < 2 and "INSUFFICIENT_CORROBORATION" not in triggers:
+                triggers.append("INSUFFICIENT_CORROBORATION")
+
         ai_required = len(triggers) > 0
 
         if ai_required:
-            reason = f"AI recommended: {', '.join(triggers)}"
+            reason = "Deterministic evidence insufficient — AI evidence analysis requested"
         else:
             reason = "Deterministic evidence sufficient — AI not required"
 

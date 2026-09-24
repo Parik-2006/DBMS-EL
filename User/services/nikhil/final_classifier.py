@@ -26,26 +26,40 @@ logger = logging.getLogger(__name__)
 class FinalClassifier:
 
     @classmethod
-    def classify(cls, initial_prediction, initial_confidence, evidence):
+    def classify(cls, *args, **kwargs):
         """
         Corroborate gathered evidence and calculate final classification.
 
-        Args:
-            initial_prediction: str (e.g. 'Defacement', 'Phishing', 'Benign', 'Malware')
-            initial_confidence: float (e.g. 0.43)
-            evidence: dict containing structured evidence from all analyzers
-
-        Returns:
-            dict: {
-                "final_classification": str,
-                "risk_level": str,
-                "risk_score": float,
-                "evidence_summary": str,
-                "evidence_breakdown": dict,
-                "corroboration": dict,
-                "threat_indicators": list
-            }
+        Supports both calling conventions:
+        - classify(initial_prediction, initial_confidence, evidence)
+        - classify(evidence, initial_prediction="Unknown", initial_confidence=0.0)
         """
+        initial_prediction = "Unknown"
+        initial_confidence = 0.0
+        evidence = {}
+
+        if len(args) == 3:
+            initial_prediction, initial_confidence, evidence = args
+        elif len(args) == 2:
+            if isinstance(args[0], dict):
+                evidence, initial_prediction = args
+            else:
+                initial_prediction, initial_confidence = args
+        elif len(args) == 1:
+            if isinstance(args[0], dict):
+                evidence = args[0]
+            else:
+                initial_prediction = args[0]
+
+        if "initial_prediction" in kwargs:
+            initial_prediction = kwargs["initial_prediction"]
+        if "initial_confidence" in kwargs:
+            initial_confidence = kwargs["initial_confidence"]
+        if "evidence" in kwargs:
+            evidence = kwargs["evidence"]
+
+        evidence = evidence or {}
+
         webpage = evidence.get("webpage", {})
         network = evidence.get("network", {})
         visual = evidence.get("visual", {})
@@ -81,19 +95,21 @@ class FinalClassifier:
             "Defacement": 0.0
         }
 
-        # -------------------------------------------------------------------
+        # -------------------------------------------------------------
         # Family 0: URL / Legitimacy Features & Trusted Domain
-        # -------------------------------------------------------------------
-        trusted_domain = threat_intel.get("trusted_domain", {})
+        # -------------------------------------------------------------
+        trusted_domain = threat_intel.get("trusted_domain") or threat_intel.get("sources", {}).get("trusted_domain", {})
         url_features = threat_intel.get("url_features", {})
 
         if trusted_domain.get("is_known"):
             # Known trusted domain — SUPPORTING evidence, NOT automatic Benign
             scores["Benign"] += 2.0
             family_contributions["Benign"].add("URL_LEGITIMACY")
+            cat_display = trusted_domain.get('category', 'N/A')
+            ver_display = " [verified]" if trusted_domain.get("verified") else ""
             breakdown["url_legitimacy"].append(
                 f"Known domain: {trusted_domain.get('organization', 'N/A')} "
-                f"(category: {trusted_domain.get('category', 'N/A')}) (+2.0 Benign)"
+                f"(category: {cat_display}{ver_display}) (+2.0 Benign)"
             )
         elif trusted_domain.get("trusted_tld"):
             scores["Benign"] += 1.0
@@ -361,7 +377,7 @@ class FinalClassifier:
             elif abuse_score == 0 and not ti_summary.get("known_malicious_ioc") and not ti_summary.get("known_malware_url"):
                 scores["Benign"] += 0.5
                 breakdown["threat_intelligence"].append(
-                    f"AbuseIPDB: Clean reputation (0% abuse score) (+0.5 Benign)"
+                    f"AbuseIPDB: 0% abuse confidence score in public reports (+0.5 Benign)"
                 )
 
         for ind in threat_intel.get("external_indicators", []):
@@ -377,7 +393,7 @@ class FinalClassifier:
         elif ti_status == "RATE_LIMITED":
             breakdown["threat_intelligence"].append("External threat intelligence RATE LIMITED (Local SQL/Domain correlation active)")
         elif ti_status == "SUCCESS" and ti_summary.get("positive_hits", 0) == 0:
-            breakdown["threat_intelligence"].append("ThreatFox & URLhaus: Clean (NO_MATCH - no known malicious IOCs)")
+            breakdown["threat_intelligence"].append("Threat intelligence: No malicious indicators found in checked sources (NO_MATCH)")
 
         # -------------------------------------------------------------------
         # Family 5: Prompt-Injection Detection
@@ -521,7 +537,7 @@ class FinalClassifier:
             risk_level = "LOW"
             risk_score = max(0.05, 0.25 - (top_score * 0.03))
             summary = (
-                f"Confirmed Benign: Validated across {independent_count} independent families "
+                f"Evidence supports Benign: Corroborated across {independent_count} independent families "
                 f"({', '.join(top_families)})."
             )
         elif top_class == "Benign" and top_score >= 4.5 and independent_count >= 3:
@@ -530,7 +546,7 @@ class FinalClassifier:
             risk_level = "LOW"
             risk_score = 0.05
             summary = (
-                f"Strong Benign: Comprehensive clean evidence from {independent_count} families "
+                f"Evidence strongly supports Benign: Corroborated across {independent_count} independent families "
                 f"({', '.join(top_families)})."
             )
         else:
@@ -562,3 +578,5 @@ class FinalClassifier:
             },
             "threat_indicators": list(set(threat_indicators))
         }
+
+    classify_with_corroboration = classify

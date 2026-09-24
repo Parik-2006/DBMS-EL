@@ -158,13 +158,15 @@ class AIAnalyzer:
                 "limitations": ai_result.get("limitations", []),
             })
         else:
+            fail_reason = manager_result.get("failover_reason") or "Deterministic evidence insufficient; AI provider unavailable"
             result.update({
                 "assessment": None,
                 "confidence": 0.0,
                 "supporting_evidence": [],
                 "contradictory_evidence": [],
                 "observations": [],
-                "reasoning_summary": manager_result.get("failover_reason", "AI unavailable"),
+                "failover_reason": fail_reason,
+                "reasoning_summary": fail_reason,
                 "limitations": ["AI analysis unavailable — continuing with deterministic evidence"],
             })
 

@@ -79,6 +79,8 @@ TRUSTED_DOMAINS = {
     "wikipedia.org": {"category": "education", "org": "Wikipedia", "verified": True},
     "linkedin.com": {"category": "technology", "org": "LinkedIn", "verified": True},
     "youtube.com": {"category": "technology", "org": "YouTube", "verified": True},
+    "instagram.com": {"category": "social_media", "org": "Instagram", "verified": True},
+    "www.instagram.com": {"category": "social_media", "org": "Instagram", "verified": True},
 }
 
 # Trusted TLDs that are harder to register (supporting evidence)
@@ -118,6 +120,7 @@ class TrustedDomainService:
                 "registered_domain": str,
                 "category": str or None,
                 "organization": str or None,
+                "verified": bool,
                 "trusted_tld": bool,
                 "evidence_type": "TRUSTED_DOMAIN"|"TRUSTED_TLD"|"UNKNOWN"
             }
@@ -136,6 +139,7 @@ class TrustedDomainService:
                 "registered_domain": registered_domain,
                 "category": None,
                 "organization": None,
+                "verified": False,
                 "trusted_tld": False,
                 "evidence_type": "UNKNOWN"
             }
@@ -147,6 +151,7 @@ class TrustedDomainService:
                     "is_known": True,
                     "category": info["category"],
                     "organization": info["org"],
+                    "verified": info.get("verified", True),
                     "evidence_type": "TRUSTED_DOMAIN"
                 })
                 return result
@@ -158,6 +163,7 @@ class TrustedDomainService:
                     "is_known": True,
                     "category": info["category"],
                     "organization": info["org"],
+                    "verified": info.get("verified", True),
                     "evidence_type": "TRUSTED_DOMAIN"
                 })
                 return result
@@ -169,6 +175,7 @@ class TrustedDomainService:
                         "is_known": True,
                         "category": info["category"],
                         "organization": info["org"],
+                        "verified": info.get("verified", True),
                         "evidence_type": "TRUSTED_DOMAIN"
                     })
                     return result

@@ -641,6 +641,193 @@ class TestMongoDBRepository(unittest.TestCase):
         repo.delete_evidence(88888)
 
 
+class TestInstagramAndAIGatekeeperRegression(unittest.TestCase):
+    """
+    Regression test suite for:
+    1. Instagram trusted-domain recognition & safety checks
+    2. AI Gatekeeper sufficient vs insufficient deterministic evidence
+    3. Proper evidence family corroboration without fake 'confirmed clean' claims
+    """
+
+    def setUp(self):
+        from User.services.nikhil.ai_gatekeeper import AIGatekeeper
+        from User.services.nikhil.final_classifier import FinalClassifier
+        from User.services.nikhil.trusted_domains import TrustedDomainService
+        self.gatekeeper = AIGatekeeper()
+        self.classifier = FinalClassifier()
+        self.td_service = TrustedDomainService()
+
+    def test_01_instagram_trusted_domain_recognition(self):
+        """1. Instagram trusted-domain recognition."""
+        result = self.td_service.lookup_domain("https://instagram.com/zuck")
+        self.assertTrue(result["is_known"])
+        self.assertEqual(result["category"], "social_media")
+        self.assertTrue(result.get("verified"))
+
+    def test_02_www_instagram_recognition(self):
+        """2. www.instagram.com recognition."""
+        result = self.td_service.lookup_domain("https://www.instagram.com/explore")
+        self.assertTrue(result["is_known"])
+        self.assertEqual(result["category"], "social_media")
+        self.assertTrue(result.get("verified"))
+
+    def test_03_instagram_evil_subdomain_not_trusted(self):
+        """3. instagram.com.evil.com NOT trusted."""
+        result = self.td_service.lookup_domain("https://instagram.com.evil.com/login.php")
+        self.assertFalse(result["is_known"])
+        self.assertNotEqual(result.get("category"), "social_media")
+
+    def test_04_instagram_login_domain_not_trusted(self):
+        """4. instagram-login.com and instagram.security-example.com NOT trusted."""
+        res1 = self.td_service.lookup_domain("https://instagram-login.com/")
+        self.assertFalse(res1["is_known"])
+        res2 = self.td_service.lookup_domain("https://instagram.security-example.com/")
+        self.assertFalse(res2["is_known"])
+
+    def test_05_deterministic_insufficient_evidence_triggers_ai_eligibility(self):
+        """5. Deterministic insufficient evidence triggers AI eligibility."""
+        evidence = {
+            "webpage": {"status": "UNAVAILABLE"},
+            "network": {"status": "SUCCESS", "ssl": {"verified": True}},
+            "visual": {"status": "UNAVAILABLE"},
+            "threat_intelligence": {"status": "UNAVAILABLE", "trusted_domain": {"is_known": False}},
+            "prompt_injection": {"prompt_injection_detected": False}
+        }
+        result = self.gatekeeper.evaluate(evidence, initial_prediction="Unknown")
+        self.assertTrue(result["ai_required"])
+        self.assertIn("INSUFFICIENT_CORROBORATION", result["triggers"])
+        self.assertIn("Deterministic evidence insufficient", result["reason"])
+
+    def test_06_deterministic_sufficient_evidence_skips_ai(self):
+        """6. Deterministic sufficient evidence skips AI."""
+        evidence = {
+            "webpage": {"status": "SUCCESS", "indicators": [], "page_structure": {"num_tags": 50}},
+            "network": {"status": "SUCCESS", "ssl": {"verified": True}, "ip_resolution": {"primary_ip": "1.2.3.4"}},
+            "visual": {"status": "UNAVAILABLE"},
+            "threat_intelligence": {
+                "status": "SUCCESS",
+                "trusted_domain": {"is_known": True, "category": "social_media", "organization": "Instagram"}
+            },
+            "prompt_injection": {"prompt_injection_detected": False}
+        }
+        result = self.gatekeeper.evaluate(evidence, initial_prediction="Benign")
+        self.assertFalse(result["ai_required"])
+        self.assertEqual(result["reason"], "Deterministic evidence sufficient — AI not required")
+
+    def test_07_unknown_insufficient_evidence_does_not_claim_ai_not_required(self):
+        """7. Unknown + insufficient evidence does not claim 'AI not required'."""
+        evidence = {
+            "webpage": {"status": "UNAVAILABLE"},
+            "network": {"status": "UNAVAILABLE"},
+            "visual": {"status": "UNAVAILABLE"},
+            "threat_intelligence": {"status": "UNAVAILABLE", "trusted_domain": {"is_known": False}},
+            "prompt_injection": {"prompt_injection_detected": False}
+        }
+        result = self.gatekeeper.evaluate(evidence, initial_prediction="Defacement")
+        self.assertNotEqual(result["reason"], "Deterministic evidence sufficient — AI not required")
+        self.assertTrue(result["ai_required"])
+
+    def test_08_no_match_does_not_become_confirmed_clean(self):
+        """8. NO_MATCH does not become 'confirmed clean'."""
+        evidence = {
+            "webpage": {"status": "UNAVAILABLE"},
+            "network": {"status": "UNAVAILABLE"},
+            "threat_intelligence": {
+                "status": "SUCCESS",
+                "summary": {"positive_hits": 0, "sources_available": 3},
+                "sources": {
+                    "threatfox": {"status": "SUCCESS", "hits": 0},
+                    "urlhaus": {"status": "SUCCESS", "hits": 0},
+                    "abuseipdb": {"status": "SUCCESS", "abuse_confidence_score": 0}
+                }
+            },
+            "visual": {"status": "UNAVAILABLE"},
+            "prompt_injection": {"prompt_injection_detected": False}
+        }
+        result = self.classifier.classify_with_corroboration(evidence)
+        summary = result["evidence_summary"]
+        self.assertNotIn("Confirmed clean", summary)
+        self.assertNotIn("Confirmed benign", summary)
+        self.assertNotIn("Proven safe", summary)
+        self.assertNotIn("Guaranteed safe", summary)
+        # Absence of malice alone does not promote to Benign
+        self.assertEqual(result["final_classification"], "Unknown")
+
+    def test_09_trusted_social_media_evidence_maps_to_url_legitimacy(self):
+        """9. Trusted social-media evidence maps to URL_LEGITIMACY."""
+        evidence = {
+            "webpage": {"status": "UNAVAILABLE"},
+            "network": {"status": "UNAVAILABLE"},
+            "threat_intelligence": {
+                "status": "SUCCESS",
+                "trusted_domain": {"is_known": True, "category": "social_media", "organization": "Instagram", "verified": True}
+            },
+            "visual": {"status": "UNAVAILABLE"},
+            "prompt_injection": {"prompt_injection_detected": False}
+        }
+        result = self.classifier.classify_with_corroboration(evidence)
+        corrob = result["corroboration"]
+        self.assertIn("URL_LEGITIMACY", corrob["families_used"])
+        self.assertGreaterEqual(corrob["all_scores"]["Benign"], 2.0)
+
+    def test_10_genuine_instagram_can_reach_benign_when_corroborated(self):
+        """10. Genuine Instagram URL can reach Benign when corroborated evidence supports it."""
+        evidence = {
+            "webpage": {"status": "SUCCESS", "indicators": [], "page_structure": {"num_tags": 25}},
+            "network": {"status": "SUCCESS", "ssl": {"verified": True}, "ip_resolution": {"primary_ip": "157.240.22.174"}},
+            "threat_intelligence": {
+                "status": "SUCCESS",
+                "trusted_domain": {"is_known": True, "category": "social_media", "organization": "Instagram", "verified": True},
+                "summary": {"positive_hits": 0}
+            },
+            "visual": {"status": "UNAVAILABLE"},
+            "prompt_injection": {"prompt_injection_detected": False}
+        }
+        result = self.classifier.classify_with_corroboration(evidence, initial_prediction="Defacement")
+        self.assertEqual(result["final_classification"], "Benign")
+        self.assertEqual(result["risk_level"], "LOW")
+        self.assertGreaterEqual(result["corroboration"]["independent_families"], 2)
+        self.assertIn("Evidence supports Benign", result["evidence_summary"])
+
+    def test_11_instagram_url_still_becomes_unknown_when_evidence_insufficient(self):
+        """11. Instagram URL still becomes Unknown when evidence remains insufficient."""
+        # e.g., only trusted domain info, but network failed, webpage failed
+        evidence = {
+            "webpage": {"status": "UNAVAILABLE"},
+            "network": {"status": "UNAVAILABLE"},
+            "threat_intelligence": {
+                "status": "SUCCESS",
+                "trusted_domain": {"is_known": True, "category": "social_media", "organization": "Instagram", "verified": True}
+            },
+            "visual": {"status": "UNAVAILABLE"},
+            "prompt_injection": {"prompt_injection_detected": False}
+        }
+        result = self.classifier.classify_with_corroboration(evidence, initial_prediction="Defacement")
+        # Only 1 independent family (URL_LEGITIMACY) -> Insufficient corroboration
+        self.assertEqual(result["final_classification"], "Unknown")
+        self.assertIn("Unknown / Needs Review", result["evidence_summary"])
+
+    def test_12_ai_unavailable_does_not_break_fallback_flow(self):
+        """12. AI unavailable does not break fallback flow."""
+        evidence = {
+            "webpage": {"status": "SUCCESS", "indicators": [], "page_structure": {"num_tags": 30}},
+            "network": {"status": "SUCCESS", "ssl": {"verified": True}, "ip_resolution": {"primary_ip": "1.2.3.4"}},
+            "threat_intelligence": {
+                "status": "SUCCESS",
+                "trusted_domain": {"is_known": True, "category": "social_media", "organization": "Instagram"}
+            },
+            "visual": {"status": "UNAVAILABLE"},
+            "prompt_injection": {"prompt_injection_detected": False},
+            "ai_analysis": {
+                "status": "UNAVAILABLE",
+                "failover_reason": "Deterministic evidence insufficient; AI provider unavailable"
+            }
+        }
+        result = self.classifier.classify_with_corroboration(evidence)
+        self.assertIn(result["final_classification"], ["Benign", "Unknown"])
+        self.assertIn("ai", result["evidence_breakdown"])
+
+
 if __name__ == '__main__':
     # Run with verbosity
     loader = unittest.TestLoader()
