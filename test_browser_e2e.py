@@ -154,14 +154,22 @@ class TestBrowserE2E(unittest.TestCase):
         self.assertIn("RISK: LOW", content)
         self.assertIn("Benign", content)
 
-        # Verify SQL & MongoDB Atlas consistency
-        latest_scan = Scan.objects.order_by("-id").first()
-        self.assertIsNotNone(latest_scan)
-        self.assertEqual(latest_scan.status, "COMPLETED")
+        # Verify SQL & MongoDB Atlas consistency in e2e_user isolated database
+        from User.db_manager import ensure_user_database, set_current_db, reset_current_db
+        u = User.objects.get(username=self.USERNAME)
+        user_db_alias = ensure_user_database(u)
 
-        pred = latest_scan.prediction
-        self.assertIsNotNone(pred)
-        self.assertEqual(pred.predicted_class, "Benign")
+        token = set_current_db(user_db_alias)
+        try:
+            latest_scan = Scan.objects.order_by("-id").first()
+            self.assertIsNotNone(latest_scan)
+            self.assertEqual(latest_scan.status, "COMPLETED")
+
+            pred = Prediction.objects.get(scan=latest_scan)
+            self.assertIsNotNone(pred)
+            self.assertEqual(pred.predicted_class, "Benign")
+        finally:
+            reset_current_db(token)
 
         # Real MongoDB Atlas Document Check
         repo = MongoDBRepository()

@@ -177,7 +177,7 @@ class FallbackIntegrationService:
         """Get scans awaiting fallback analysis"""
         return Scan.objects.filter(
             status='UNCERTAIN'
-        ).select_related('url', 'user', 'prediction').order_by('-created_at')[:limit]
+        ).select_related('url', 'prediction').order_by('-created_at')[:limit]
     
     @staticmethod
     def get_scan_status(scan_id):

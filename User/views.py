@@ -372,19 +372,30 @@ def register(request):
                 messages.error(request, f'Database error while checking username: {str(e)}')
                 return render(request, 'register.html')
 
-            # Create user
+            # Create user in control database and provision isolated user MySQL database
+            created_user = None
             try:
                 print(f"[REGISTER] Creating user: {username}")
-                user = User.objects.create_user(username=username, email=email, password=password)
-                user.save()
-                print(f"[REGISTER] User created successfully: {username}")
+                created_user = User.objects.create_user(username=username, email=email, password=password)
+                
+                # Provision dedicated MySQL database for this user
+                from User.db_manager import ensure_user_database
+                ensure_user_database(created_user)
+                
+                print(f"[REGISTER] User and database created successfully: {username}")
                 messages.success(request, 'Registration successful! Please login.')
                 return HttpResponseRedirect('/login')
             except Exception as e:
-                print(f"[REGISTER] Error creating user: {str(e)}")
+                print(f"[REGISTER] Error during user or database creation: {str(e)}")
                 print(traceback.format_exc())
-                messages.error(request, f'Error creating user: {str(e)}')
+                if created_user and created_user.id:
+                    try:
+                        created_user.delete()
+                    except Exception:
+                        pass
+                messages.error(request, 'Error creating account and provisioning workspace. Please try again.')
                 return render(request, 'register.html')
+
 
         except Exception as e:
             print(f"[REGISTER] CRITICAL ERROR: {str(e)}")
@@ -714,8 +725,14 @@ def data(request):
             return render(request, 'data.html', {'data': mock_data})
 
         try:
-            user_data = MaliciousBot.objects.filter(user=request.user).order_by('-timestamp')
+            from User.models import HistoryClearEvent
+            latest_clear = HistoryClearEvent.objects.order_by('-cleared_at').first()
+            user_data = MaliciousBot.objects.all().order_by('-timestamp')
+            if latest_clear:
+                user_data = user_data.filter(timestamp__gt=latest_clear.cleared_at)
+
             data_list = []
+
             mongo_repo = None
             for item in user_data:
                 try:
@@ -772,7 +789,29 @@ def data(request):
         messages.error(request, error_msg)
         return render(request, 'data.html', {'error': error_msg})
 
+def clear_history(request):
+    """
+    Non-destructive history visibility reset.
+    Does NOT delete any record from MySQL or MongoDB.
+    Inserts a HistoryClearEvent timestamp so older scans are hidden from the UI.
+    """
+    if not request.user.is_authenticated:
+        messages.warning(request, 'Please log in to clear history view')
+        return HttpResponseRedirect('/login')
+        
+    if request.method == 'POST':
+        from django.utils import timezone
+        from User.models import HistoryClearEvent
+        HistoryClearEvent.objects.create(
+            user_id=request.user.id,
+            cleared_at=timezone.now()
+        )
+        messages.info(request, "History cleared from view. Your records remain stored securely.")
+        return HttpResponseRedirect('/data')
+    return HttpResponseRedirect('/data')
+
 def logout(request):
+
     auth.logout(request)
     return HttpResponseRedirect('/')
 

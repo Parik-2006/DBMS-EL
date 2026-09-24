@@ -8,6 +8,7 @@ urlpatterns=[
     path('login',views.login,name='login'),
     path('adminlogin',views.adminlogin,name='adminlogin'),
     path('data',views.data,name='data'),
+    path('clear-history',views.clear_history,name='clear_history'),
     path('predict',views.predict,name="predict"),
     path('logout',views.logout,name='logout'),
     path('adminhome',views.adminhome,name='adminhome'),

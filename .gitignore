@@ -58,6 +58,8 @@ db.sqlite3
 staticfiles/
 screenshots/
 *.sqlite3
+*.backup
+
 
 # Virtual environments
 .venv/

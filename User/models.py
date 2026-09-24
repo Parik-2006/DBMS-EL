@@ -20,7 +20,7 @@ class AnalystReview(models.Model):
     ]
     
     scan = models.OneToOneField('Scan', on_delete=models.CASCADE, related_name='analyst_review')
-    reviewer = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+    reviewer = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, db_constraint=False)
     reviewed_at = models.DateTimeField(auto_now_add=True)
     final_label = models.CharField(max_length=20, choices=VALIDATION_CHOICES)
     review_notes = models.TextField(blank=True, null=True)
@@ -33,13 +33,14 @@ class AnalystReview(models.Model):
         return f"Review for Scan {self.scan.id}: {self.final_label}"
 
 class MaliciousBot(models.Model):
-    user = models.ForeignKey(User, on_delete=models.CASCADE, null=True, blank=True)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, null=True, blank=True, db_constraint=False)
     url = models.TextField()
     bot = models.CharField(max_length=90, null=True, blank=True)
     prediction = models.TextField(null=True, blank=True)
     prediction_type = models.CharField(max_length=50, null=True, blank=True)
     confidence = models.CharField(max_length=50, null=True, blank=True)
     timestamp = models.DateTimeField(auto_now_add=True, null=True)
+
     
     def __str__(self):
         return f"{self.user} - {self.url} ({self.prediction_type})" if self.user else f"Guest - {self.url}"
@@ -85,7 +86,7 @@ class URL(models.Model):
         ('CORRELATION', 'Correlation Analysis'),
     ]
     
-    url = models.TextField(unique=True, db_index=True)
+    url = models.CharField(max_length=500, unique=True, db_index=True)
     domain = models.ForeignKey(Domain, on_delete=models.CASCADE, related_name='urls', null=True, blank=True)
     source = models.CharField(max_length=20, choices=URL_SOURCE_CHOICES, default='USER_SCAN')
     baseline_label = models.CharField(
@@ -146,7 +147,7 @@ class Scan(models.Model):
         ('ERROR', 'Error during scan'),
     ]
     
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='scans', null=True, blank=True)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='scans', null=True, blank=True, db_constraint=False)
     url = models.ForeignKey(URL, on_delete=models.CASCADE, related_name='scans')
     status = models.CharField(max_length=20, choices=SCAN_STATUS_CHOICES, db_index=True)
     
@@ -230,7 +231,7 @@ class ThreatIndicator(models.Model):
     ]
     
     indicator_type = models.CharField(max_length=30, choices=INDICATOR_TYPE_CHOICES, db_index=True)
-    indicator_value = models.TextField()
+    indicator_value = models.CharField(max_length=255)
     severity = models.CharField(max_length=10, choices=SEVERITY_CHOICES, default='MEDIUM')
     created_at = models.DateTimeField(auto_now_add=True)
     
@@ -262,3 +263,48 @@ class ScanIndicator(models.Model):
     
     def __str__(self):
         return f"Scan {self.scan.id} - {self.indicator.indicator_type}"
+
+
+class UserDatabaseRegistry(models.Model):
+    """
+    Control database registry mapping users to their isolated MySQL databases.
+    Stored in maliciousbot_core.
+    """
+    STATUS_CHOICES = [
+        ('active', 'Active'),
+        ('suspended', 'Suspended'),
+        ('archived', 'Archived'),
+    ]
+    
+    user_id = models.IntegerField(unique=True, db_index=True)
+    username = models.CharField(max_length=150, db_index=True)
+    database_name = models.CharField(max_length=100, unique=True, db_index=True)
+    status = models.CharField(max_length=30, choices=STATUS_CHOICES, default='active')
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_used_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'user_database_registry'
+        verbose_name = 'User Database Registry'
+        verbose_name_plural = 'User Database Registries'
+
+    def __str__(self):
+        return f"User {self.username} (ID: {self.user_id}) -> {self.database_name}"
+
+
+class HistoryClearEvent(models.Model):
+    """
+    Non-destructive history visibility reset record.
+    Stored in per-user database. Scans prior to cleared_at are hidden from the UI,
+    retaining all underlying database records permanently.
+    """
+    user_id = models.IntegerField(null=True, blank=True, db_index=True)
+    cleared_at = models.DateTimeField(db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'history_clear_events'
+        ordering = ['-cleared_at']
+
+    def __str__(self):
+        return f"History clear for user {self.user_id} at {self.cleared_at}"

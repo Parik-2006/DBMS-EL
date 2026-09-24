@@ -29,7 +29,7 @@ class CorrelationService:
         """Get complete scan history for a domain"""
         scans = Scan.objects.filter(
             url__domain_id=domain_id
-        ).select_related('prediction', 'user').order_by('-created_at')
+        ).select_related('prediction').order_by('-created_at')
         return scans
     
     @staticmethod
@@ -43,16 +43,17 @@ class CorrelationService:
         last_class = None
         
         for scan in scans:
-            if scan.prediction:
-                if scan.prediction.predicted_class != last_class:
+            pred = getattr(scan, 'prediction', None)
+            if pred:
+                if pred.predicted_class != last_class:
                     changes.append({
                         'scan_id': scan.id,
                         'timestamp': scan.created_at,
-                        'predicted_class': scan.prediction.predicted_class,
-                        'confidence': scan.prediction.confidence,
+                        'predicted_class': pred.predicted_class,
+                        'confidence': pred.confidence,
                         'url': scan.url.url
                     })
-                    last_class = scan.prediction.predicted_class
+                    last_class = pred.predicted_class
         
         return changes
     
@@ -88,13 +89,14 @@ class CorrelationService:
         
         history = []
         for scan in scans:
-            if scan.prediction:
+            pred = getattr(scan, 'prediction', None)
+            if pred:
                 history.append({
                     'scan_id': scan.id,
                     'timestamp': scan.created_at,
-                    'risk_score': scan.prediction.risk_score,
-                    'predicted_class': scan.prediction.predicted_class,
-                    'confidence': scan.prediction.confidence
+                    'risk_score': pred.risk_score,
+                    'predicted_class': pred.predicted_class,
+                    'confidence': pred.confidence
                 })
         
         return history
@@ -110,7 +112,8 @@ class CorrelationService:
         if not scans.exists():
             return None
         
-        predictions = [s.prediction for s in scans if s.prediction]
+        predictions = [getattr(s, 'prediction', None) for s in scans]
+        predictions = [p for p in predictions if p is not None]
         
         if not predictions:
             return None

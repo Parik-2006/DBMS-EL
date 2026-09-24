@@ -192,17 +192,139 @@
       max-width: 180px;
     }
   }
+  .history-header-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 15px;
+    margin-bottom: 20px;
+  }
+  .btn-clear-history {
+    background-color: #fff5f5;
+    color: #e53e3e;
+    border: 1px solid #feb2b2;
+    padding: 8px 16px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .btn-clear-history:hover {
+    background-color: #e53e3e;
+    color: white;
+    border-color: #e53e3e;
+  }
+  .modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.5);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 9999;
+  }
+  .modal-box {
+    background: white;
+    border-radius: 10px;
+    max-width: 480px;
+    width: 90%;
+    padding: 24px;
+    box-shadow: 0 10px 25px rgba(0,0,0,0.2);
+  }
+  .modal-title {
+    font-size: 18px;
+    font-weight: 700;
+    color: #1a202c;
+    margin-bottom: 10px;
+  }
+  .modal-desc {
+    font-size: 14px;
+    color: #4a5568;
+    line-height: 1.5;
+    margin-bottom: 20px;
+  }
+  .modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+  }
+  .btn-modal-cancel {
+    padding: 8px 16px;
+    border: 1px solid #cbd5e0;
+    background: white;
+    color: #4a5568;
+    border-radius: 6px;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  .btn-modal-confirm {
+    padding: 8px 16px;
+    border: 1px solid #e53e3e;
+    background: #e53e3e;
+    color: white;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .btn-modal-confirm:hover {
+    background: #c53030;
+  }
 </style>
 
 <div class="body_bg layout_padding">
   <section class="contact_section">
     <div class="history-container">
-      <div class="history-header">
-        <h2>Prediction History</h2>
-        <p>Review your past URL security analyses and their results.</p>
+      <div class="history-header-row">
+        <div>
+          <h2 style="font-weight: 700; color: #1a202c; margin-bottom: 5px;">Prediction History</h2>
+          <p style="color: #718096; font-size: 14px; margin: 0;">Review your past URL security analyses and their results.</p>
+        </div>
+        <div>
+          <button type="button" class="btn-clear-history" id="openClearModalBtn" onclick="openClearModal()">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+            CLEAR HISTORY
+          </button>
+        </div>
       </div>
 
+      <!-- Confirmation Modal -->
+      <div class="modal-overlay" id="clearModalOverlay">
+        <div class="modal-box">
+          <div class="modal-title">Clear history from this page?</div>
+          <div class="modal-desc">
+            Your previous scans will be hidden from your History page, but they will <strong>NOT</strong> be deleted from the database. All records remain permanently stored and secure.
+          </div>
+          <form method="POST" action="{% url 'clear_history' %}">
+            {% csrf_token %}
+            <div class="modal-actions">
+              <button type="button" class="btn-modal-cancel" onclick="closeClearModal()">CANCEL</button>
+              <button type="submit" class="btn-modal-confirm">CLEAR HISTORY</button>
+            </div>
+          </form>
+        </div>
+      </div>
+
+      {% if messages %}
+      <div style="margin-bottom: 18px;">
+        {% for message in messages %}
+        <div class="alert alert-{% if message.tags == 'error' %}danger{% elif message.tags == 'info' %}info{% else %}{{ message.tags }}{% endif %}" style="border-radius: 6px; font-size: 14px; padding: 12px 16px;">
+          {{ message }}
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+
       <!-- Search and Filters -->
+
       <div class="search-filter-bar">
         <input type="text" id="searchInput" class="search-input" placeholder="Search URL..." oninput="filterTable()">
         <button class="filter-btn active" data-filter="all" onclick="setFilter(this, 'all')">All</button>
@@ -212,6 +334,7 @@
         <button class="filter-btn" data-filter="Defacement" onclick="setFilter(this, 'Defacement')">Defacement</button>
         <button class="filter-btn" data-filter="Unknown" onclick="setFilter(this, 'Unknown')">Unknown</button>
       </div>
+
 
       {% if data and data|length > 0 %}
       <div class="history-table-wrapper">
@@ -353,6 +476,29 @@
       }
     }
   }
+
+  function openClearModal() {
+    var modal = document.getElementById('clearModalOverlay');
+    if (modal) {
+      modal.style.display = 'flex';
+    }
+  }
+
+  function closeClearModal() {
+    var modal = document.getElementById('clearModalOverlay');
+    if (modal) {
+      modal.style.display = 'none';
+    }
+  }
+
+  // Close modal when clicking outside box
+  window.addEventListener('click', function(e) {
+    var modal = document.getElementById('clearModalOverlay');
+    if (e.target === modal) {
+      modal.style.display = 'none';
+    }
+  });
 </script>
+
 
 {% endblock %}

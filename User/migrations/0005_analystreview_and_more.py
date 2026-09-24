@@ -164,8 +164,9 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name='analystreview',
             name='reviewer',
-            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, to=settings.AUTH_USER_MODEL),
+            field=models.ForeignKey(blank=True, db_constraint=False, null=True, on_delete=django.db.models.deletion.SET_NULL, to=settings.AUTH_USER_MODEL),
         ),
+
         migrations.AddField(
             model_name='analystreview',
             name='scan',

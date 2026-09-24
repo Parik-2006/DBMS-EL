@@ -47,7 +47,7 @@ class Migration(migrations.Migration):
             fields=[
                 ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
                 ('indicator_type', models.CharField(choices=[('IP_ADDRESS', 'IP Address'), ('DOMAIN', 'Domain'), ('URL_LENGTH', 'URL Length Anomaly'), ('SPECIAL_CHARS', 'Special Characters'), ('SHORTENER', 'URL Shortener'), ('SSL_CERTIFICATE', 'SSL Certificate Issue'), ('GEOLOCATION', 'Suspicious Geolocation'), ('REPUTATION', 'Low Reputation Score'), ('OTHER', 'Other')], db_index=True, max_length=30)),
-                ('indicator_value', models.TextField()),
+                ('indicator_value', models.CharField(max_length=255)),
                 ('severity', models.CharField(choices=[('LOW', 'Low'), ('MEDIUM', 'Medium'), ('HIGH', 'High'), ('CRITICAL', 'Critical')], default='MEDIUM', max_length=10)),
                 ('created_at', models.DateTimeField(auto_now_add=True)),
             ],
@@ -60,7 +60,7 @@ class Migration(migrations.Migration):
             name='URL',
             fields=[
                 ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('url', models.TextField(db_index=True, unique=True)),
+                ('url', models.CharField(db_index=True, max_length=500, unique=True)),
                 ('source', models.CharField(choices=[('BASELINE', 'Baseline Dataset'), ('USER_SCAN', 'User Scan'), ('CORRELATION', 'Correlation Analysis')], default='USER_SCAN', max_length=20)),
                 ('baseline_label', models.CharField(blank=True, choices=[('benign', 'Benign'), ('defacement', 'Defacement'), ('phishing', 'Phishing'), ('malware', 'Malware')], help_text='Only populated for baseline dataset URLs', max_length=20, null=True)),
                 ('created_at', models.DateTimeField(auto_now_add=True)),
@@ -81,7 +81,8 @@ class Migration(migrations.Migration):
                 ('updated_at', models.DateTimeField(auto_now=True)),
                 ('completed_at', models.DateTimeField(blank=True, null=True)),
                 ('url', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='scans', to='User.url')),
-                ('user', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.CASCADE, related_name='scans', to='auth.user')),
+                ('user', models.ForeignKey(blank=True, db_constraint=False, null=True, on_delete=django.db.models.deletion.CASCADE, related_name='scans', to='auth.user')),
+
             ],
             options={
                 'db_table': 'pari_scan',
