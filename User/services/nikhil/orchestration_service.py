@@ -45,7 +45,7 @@ class FallbackOrchestrator:
         self.trusted_domain_service = TrustedDomainService()
         self.mongo_repo = MongoDBRepository()
 
-    def perform_deep_analysis(self, scan_id, url, initial_prediction=None, initial_confidence=None):
+    def perform_deep_analysis(self, scan_id, url, initial_prediction=None, initial_confidence=None, pari_features=None):
         """
         Execute deep analysis modules safely and assemble structured evidence.
 
@@ -54,12 +54,22 @@ class FallbackOrchestrator:
             url: str target URL
             initial_prediction: str initial ML class (optional)
             initial_confidence: float initial ML confidence (optional)
+            pari_features: dict original 10 PARI features (optional)
 
         Returns:
             tuple: (dict evidence_data, str mongo_doc_id)
         """
         start_time = time.time()
         logger.info(f"Orchestrating fallback deep analysis for Scan {scan_id}: {url}")
+
+        # Ensure PARI features are available using existing extraction logic if not already provided
+        if pari_features is None and url:
+            try:
+                from User.services.ml_service import MLPredictionService
+                pari_features = MLPredictionService.extract_pari_features(url)
+            except Exception as e:
+                logger.warning(f"Could not extract PARI features for {url}: {e}")
+                pari_features = None
 
         # 1. Webpage / DOM Analysis
         try:
@@ -140,7 +150,8 @@ class FallbackOrchestrator:
                 ai_evidence = self.ai_analyzer.analyze_with_ai(
                     evidence_for_ai,
                     initial_prediction=initial_prediction,
-                    initial_confidence=initial_confidence
+                    initial_confidence=initial_confidence,
+                    pari_features=pari_features
                 )
             except Exception as e:
                 logger.error(f"AI analysis exception for Scan {scan_id}: {e}")
@@ -154,13 +165,17 @@ class FallbackOrchestrator:
                 }
 
         # Complete evidence bundle
+        initial_ml_data = {
+            "class": initial_prediction,
+            "confidence": initial_confidence
+        }
+        if pari_features is not None:
+            initial_ml_data["pari_features"] = pari_features
+
         evidence_data = {
             "scan_id": scan_id,
             "url": url,
-            "initial_ml": {
-                "class": initial_prediction,
-                "confidence": initial_confidence
-            },
+            "initial_ml": initial_ml_data,
             "analysis_status": "COMPLETED",
             "webpage": webpage_evidence,
             "network": network_evidence,

@@ -123,6 +123,17 @@ Open: [https://github.com/Parik-2006/diploma-project](https://github.com/Parik-2
 
 ---
 
+## 📚 Documentation
+
+Detailed technical documentation is consolidated under the [`docs/`](file:///P:/DBMS%20EL/diploma-project/docs/) directory:
+
+- [System Architecture & ML Pipeline Specification](file:///P:/DBMS%20EL/diploma-project/docs/ARCHITECTURE.md): Comprehensive system flow, PARI 10-feature extraction, Random Forest pipeline, and fallback orchestration.
+- [Database Architecture & Schema Specification](file:///P:/DBMS%20EL/diploma-project/docs/DATABASE.md): MySQL dual-database routing (`maliciousbot_core`, `maliciousbot_guest`), normalized schemas, and MongoDB Atlas evidence store (`deep_analysis_cases`).
+- [Nikhil Fallback Subsystem Specification](file:///P:/DBMS%20EL/diploma-project/docs/NIKHIL.md): Deterministic 6-module evidence collector pipeline, community threat intel, free-only policy, and multi-family corroboration.
+- [Verification & Validation Report](file:///P:/DBMS%20EL/diploma-project/docs/VERIFICATION.md): Full automated test suite results (145 tests), real runtime scan logs, and security guardrail verification.
+
+---
+
 ## 👥 Team
 
 - Appu Gowda GC

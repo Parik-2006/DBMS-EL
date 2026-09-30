@@ -56,7 +56,8 @@ coverage.xml
 db.sqlite3
 /media/
 staticfiles/
-screenshots/
+screenshots/*.png
+!screenshots/.gitkeep
 *.sqlite3
 *.backup
 
@@ -85,8 +86,9 @@ Desktop.ini
 .env.*
 *.env
 
-# Temporary/debug scripts
+# Temporary/debug scripts and local tests
 query_db_canonical.py
+tests_local/
 
 # Python cache artifacts
 *.pyc

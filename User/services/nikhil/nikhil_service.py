@@ -51,6 +51,7 @@ class NikhilService:
         url = scan_data.get("url")
         initial_prediction = scan_data.get("initial_prediction")
         initial_confidence = scan_data.get("initial_confidence")
+        pari_features = scan_data.get("pari_features")
         
         logger.info(f"Initiating evidence-driven fallback for Scan {scan_id}: {url}")
         
@@ -59,7 +60,8 @@ class NikhilService:
         evidence_data, mongo_doc_id = orchestrator.perform_deep_analysis(
             scan_id, url,
             initial_prediction=initial_prediction,
-            initial_confidence=initial_confidence
+            initial_confidence=initial_confidence,
+            pari_features=pari_features
         )
         
         # 2. Perform multi-family evidence corroboration & rule-based classification

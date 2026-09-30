@@ -164,11 +164,27 @@ class EvidenceNormalizer:
         threat_norm = normalized_evidence.get("threat_intelligence", {})
         prompt_norm = normalized_evidence.get("prompt_injection", {})
 
+        initial_ml_payload = {
+            "class": initial_ml.get("class") or initial_ml.get("prediction", "Unknown"),
+            "confidence": initial_ml.get("confidence", 0.0),
+        }
+        if "pari_features" in initial_ml and isinstance(initial_ml["pari_features"], dict):
+            pari_f = initial_ml["pari_features"]
+            initial_ml_payload["pari_features"] = {
+                "url_len": pari_f.get("url_len"),
+                "letters_count": pari_f.get("letters_count"),
+                "digits_count": pari_f.get("digits_count"),
+                "special_chars_count": pari_f.get("special_chars_count"),
+                "shortened": pari_f.get("shortened"),
+                "abnormal_url": pari_f.get("abnormal_url"),
+                "secure_http": pari_f.get("secure_http"),
+                "have_ip": pari_f.get("have_ip"),
+                "url_region": pari_f.get("url_region"),
+                "root_domain": pari_f.get("root_domain"),
+            }
+
         return {
-            "initial_ml": {
-                "class": initial_ml.get("class", "Unknown"),
-                "confidence": initial_ml.get("confidence", 0.0),
-            },
+            "initial_ml": initial_ml_payload,
             "webpage": {
                 "status": webpage_norm.get("status", "NOT_RUN"),
                 "title": webpage_norm.get("metadata", {}).get("title", "")[:200],

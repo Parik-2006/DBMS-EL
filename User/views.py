@@ -641,7 +641,8 @@ def predict(request):
                         'url': url,
                         'initial_prediction': initial_prediction,
                         'initial_confidence': initial_confidence_float,
-                        'scan_status': 'UNCERTAIN'
+                        'scan_status': 'UNCERTAIN',
+                        'pari_features': pred_data.get('pari_features')
                     })
 
                     # Process fallback result in SQL database

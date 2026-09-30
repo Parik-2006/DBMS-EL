@@ -39,7 +39,7 @@ class AIAnalyzer:
             self._gatekeeper = AIGatekeeper()
         return self._gatekeeper
 
-    def analyze_with_ai(self, evidence_data, initial_prediction=None, initial_confidence=None):
+    def analyze_with_ai(self, evidence_data, initial_prediction=None, initial_confidence=None, pari_features=None):
         """
         Perform AI analysis if warranted by the gatekeeper.
 
@@ -47,6 +47,7 @@ class AIAnalyzer:
             evidence_data: dict containing gathered evidence from all collectors
             initial_prediction: str initial ML class
             initial_confidence: float initial ML confidence
+            pari_features: dict original 10 PARI features (optional)
 
         Returns:
             dict: AI analysis result including gatekeeper decision and provider status
@@ -112,10 +113,13 @@ class AIAnalyzer:
         # AI is recommended — prepare evidence payload
         from User.services.nikhil.evidence_normalizer import EvidenceNormalizer
 
+        pari_feats = pari_features or evidence_data.get("initial_ml", {}).get("pari_features") or evidence_data.get("pari_features")
         initial_ml = {
             "class": initial_prediction or "Unknown",
             "confidence": initial_confidence or 0.0
         }
+        if pari_feats is not None:
+            initial_ml["pari_features"] = pari_feats
 
         # Normalize evidence for AI input
         normalized = {}
