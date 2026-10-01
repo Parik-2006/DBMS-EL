@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 from datetime import datetime
 from urllib.parse import urlparse
 from User.models import Scan, Prediction, URL, Domain, ThreatIndicator, ScanIndicator, ScanFeatures
@@ -18,6 +19,19 @@ class MLPredictionService:
         2: 'Phishing',
         3: 'Malware'
     }
+
+    PARI_FEATURE_NAMES = [
+        'url_len',
+        'letters_count',
+        'digits_count',
+        'special_chars_count',
+        'shortened',
+        'abnormal_url',
+        'secure_http',
+        'have_ip',
+        'url_region',
+        'root_domain'
+    ]
 
     @staticmethod
     def create_scan_record(url_obj, user=None):
@@ -103,28 +117,46 @@ class MLPredictionService:
         try:
             pari_features = MLPredictionService.extract_pari_features(url)
 
-            features = np.array([[
-                pari_features['url_len'],
-                pari_features['letters_count'],
-                pari_features['digits_count'],
-                pari_features['special_chars_count'],
-                pari_features['shortened'],
-                pari_features['abnormal_url'],
-                pari_features['secure_http'],
-                pari_features['have_ip'],
-                pari_features['url_region'],
-                pari_features['root_domain']
-            ]])
+            features_df = pd.DataFrame(
+                [[pari_features[col] for col in MLPredictionService.PARI_FEATURE_NAMES]],
+                columns=MLPredictionService.PARI_FEATURE_NAMES
+            )
 
-            prediction_class = pipeline.predict(features)[0]
-            probabilities = pipeline.predict_proba(features)[0]
+            prediction_class_raw = pipeline.predict(features_df)[0]
+            probabilities_raw = pipeline.predict_proba(features_df)[0]
 
-            confidence = max(probabilities)
-            predicted_class_name = MLPredictionService.CLASS_MAPPING.get(prediction_class, 'Unknown')
-            risk_score = 1.0 - confidence if predicted_class_name == 'Benign' else confidence
+            if hasattr(prediction_class_raw, 'item'):
+                prediction_class = prediction_class_raw.item()
+            else:
+                prediction_class = prediction_class_raw
 
-            threshold = get_confidence_threshold()
-            is_confident = confidence >= threshold
+            predicted_class_name = str(MLPredictionService.CLASS_MAPPING.get(prediction_class, 'Unknown'))
+
+            probabilities_list = [float(p) for p in np.asarray(probabilities_raw).ravel()]
+
+            if hasattr(pipeline, 'classes_'):
+                probabilities_dict = {}
+                for idx, cls in enumerate(pipeline.classes_):
+                    cls_key = cls.item() if hasattr(cls, 'item') else cls
+                    cls_name = MLPredictionService.CLASS_MAPPING.get(cls_key, str(cls_key))
+                    if idx < len(probabilities_list):
+                        probabilities_dict[cls_name] = float(probabilities_list[idx])
+                for canonical_name in ['Benign', 'Defacement', 'Phishing', 'Malware']:
+                    if canonical_name not in probabilities_dict:
+                        probabilities_dict[canonical_name] = 0.0
+            else:
+                probabilities_dict = {
+                    'Benign': float(probabilities_list[0]) if len(probabilities_list) > 0 else 0.0,
+                    'Defacement': float(probabilities_list[1]) if len(probabilities_list) > 1 else 0.0,
+                    'Phishing': float(probabilities_list[2]) if len(probabilities_list) > 2 else 0.0,
+                    'Malware': float(probabilities_list[3]) if len(probabilities_list) > 3 else 0.0,
+                }
+
+            confidence = float(max(probabilities_list))
+            risk_score = float(1.0 - confidence if predicted_class_name == 'Benign' else confidence)
+
+            threshold = float(get_confidence_threshold())
+            is_confident = bool(confidence >= threshold)
 
             scan_status = 'CONFIDENT' if is_confident else 'UNCERTAIN'
             scan_obj.status = scan_status
@@ -136,12 +168,7 @@ class MLPredictionService:
                 predicted_class=predicted_class_name,
                 confidence=confidence,
                 risk_score=risk_score,
-                probabilities={
-                    'Benign': float(probabilities[0]),
-                    'Defacement': float(probabilities[1]),
-                    'Phishing': float(probabilities[2]),
-                    'Malware': float(probabilities[3])
-                },
+                probabilities=probabilities_dict,
                 # --- PHASE 3: initial-ML snapshot fields ---
                 threshold_used=threshold,
                 is_confident=is_confident,
@@ -197,17 +224,17 @@ class MLPredictionService:
             prediction._pari_features = pari_features
 
             return {
-                'scan_id': scan_obj.id,
-                'url': url,
+                'scan_id': int(scan_obj.id),
+                'url': str(url),
                 'predicted_class': predicted_class_name,
-                'confidence': float(confidence),
-                'risk_score': float(risk_score),
+                'confidence': confidence,
+                'risk_score': risk_score,
                 'scan_status': scan_status,
                 'model_name': 'RandomForest',
                 'probabilities': prediction.probabilities,
                 'is_confident': is_confident,
                 'fallback_needed': not is_confident,
-                'prediction_id': prediction.id,
+                'prediction_id': int(prediction.id),
                 'pari_features': pari_features
             }
 
