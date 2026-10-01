@@ -1,9 +1,13 @@
 import numpy as np
 from datetime import datetime
 from urllib.parse import urlparse
-from User.models import Scan, Prediction, URL, Domain, ThreatIndicator, ScanIndicator
+from User.models import Scan, Prediction, URL, Domain, ThreatIndicator, ScanIndicator, ScanFeatures
 from User.services import get_confidence_threshold
 import json
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 class MLPredictionService:
     """Service for making predictions with confidence routing"""
@@ -137,8 +141,57 @@ class MLPredictionService:
                     'Defacement': float(probabilities[1]),
                     'Phishing': float(probabilities[2]),
                     'Malware': float(probabilities[3])
-                }
+                },
+                # --- PHASE 3: initial-ML snapshot fields ---
+                threshold_used=threshold,
+                is_confident=is_confident,
             )
+
+            # --- PHASE 2: Persist PARI 10 features in MySQL ---
+            # Uses the exact same pari_features dict already passed to RandomForest.
+            # get_or_create ensures idempotency; the scan field is OneToOne so
+            # a second call for the same scan simply returns the existing row.
+            try:
+                ScanFeatures.objects.get_or_create(
+                    scan=scan_obj,
+                    defaults={
+                        'url_len':              pari_features['url_len'],
+                        'letters_count':        pari_features['letters_count'],
+                        'digits_count':         pari_features['digits_count'],
+                        'special_chars_count':  pari_features['special_chars_count'],
+                        'shortened':            pari_features['shortened'],
+                        'abnormal_url':         pari_features['abnormal_url'],
+                        'secure_http':          pari_features['secure_http'],
+                        'have_ip':              pari_features['have_ip'],
+                        'url_region':           pari_features['url_region'],
+                        'root_domain':          pari_features['root_domain'],
+                    }
+                )
+            except Exception as feat_err:
+                # Never allow a MySQL feature-write failure to crash the scan pipeline.
+                logger.error(
+                    "Failed to persist ScanFeatures for scan %s: %s",
+                    scan_obj.id, feat_err
+                )
+            # --- END PHASE 2 ---
+
+            # --- PHASE 10: Persist confident final decision if RF is confident ---
+            if is_confident:
+                try:
+                    from User.services.fallback_service import FallbackIntegrationService
+                    FallbackIntegrationService.persist_confident_final_decision(
+                        scan=scan_obj,
+                        predicted_class=predicted_class_name,
+                        confidence=confidence,
+                        risk_score=risk_score
+                    )
+                except Exception as fd_err:
+                    logger.error(
+                        "Failed to persist confident ScanFinalDecision for scan %s: %s",
+                        scan_obj.id, fd_err
+                    )
+            # --- END PHASE 10 ---
+
 
             scan_obj._pari_features = pari_features
             prediction._pari_features = pari_features

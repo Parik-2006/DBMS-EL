@@ -97,7 +97,7 @@ class FallbackOrchestrator:
             resolved_ip = network_evidence.get("ip_resolution", {}).get("primary_ip")
             domain_name = network_evidence.get("domain")
             threat_intel_evidence = self.threat_intel_service.analyze_threat_intel(
-                url, domain=domain_name, ip=resolved_ip
+                url, domain=domain_name, ip=resolved_ip, scan_id=scan_id
             )
         except Exception as e:
             logger.error(f"Threat intelligence exception for Scan {scan_id}: {e}")

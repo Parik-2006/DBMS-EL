@@ -51,7 +51,7 @@ class ThreatIntelService:
         self.trusted_domains = trusted_domains or TrustedDomainService()
 
     @class_or_instance_method
-    def analyze_threat_intel(self, url: str, domain: str = None, ip: str = None) -> dict:
+    def analyze_threat_intel(self, url: str, domain: str = None, ip: str = None, scan_id: int = None, db_alias: str = None) -> dict:
         """
         Execute deterministic, targeted threat intelligence correlation.
 
@@ -59,6 +59,8 @@ class ThreatIntelService:
             url: str target URL
             domain: optional str domain / host
             ip: optional str resolved IP address
+            scan_id: optional int current scan ID to exclude from historical correlation
+            db_alias: optional str database connection alias for isolation
 
         Returns:
             dict: Structured, normalized threat intelligence evidence
@@ -125,10 +127,10 @@ class ThreatIntelService:
         }
 
         # -------------------------------------------------------------
-        # 1. Local SQL Correlation (Always executed)
+        # 1. Local SQL Correlation (Always executed via HistoricalIntelligenceService)
         # -------------------------------------------------------------
         try:
-            sql_data = self._check_local_sql(host, url)
+            sql_data = self._check_local_sql(host, url, scan_id=scan_id, db_alias=db_alias, ip=ip)
             evidence["sources"]["local_sql"] = sql_data
             evidence["local_correlation"] = sql_data
 
@@ -385,45 +387,33 @@ class ThreatIntelService:
         return evidence
 
     @staticmethod
-    def _check_local_sql(host: str, url: str) -> dict:
+    def _check_local_sql(host: str, url: str, scan_id: int = None, db_alias: str = None, ip: str = None) -> dict:
         """
-        Local SQL Correlation using existing PARI tables.
+        Local SQL Correlation delegating to HistoricalIntelligenceService over MySQL models.
         """
-        sql_data = {
-            "status": "SUCCESS",
-            "previous_scans_count": 0,
-            "known_malicious_in_domain": 0,
-            "historical_indicators": [],
-            "domain_status": "UNKNOWN"
-        }
         try:
-            from User.models import Scan, Domain, ThreatIndicator, ScanIndicator
-            domain_objs = Domain.objects.filter(domain_name__iexact=host)
-            if domain_objs.exists():
-                domain_obj = domain_objs.first()
-                sql_data["domain_status"] = domain_obj.status
-                
-                domain_scans = Scan.objects.filter(url__domain=domain_obj)
-                sql_data["previous_scans_count"] = domain_scans.count()
-
-                malicious_scans = domain_scans.filter(
-                    prediction__predicted_class__in=['Phishing', 'Malware', 'Defacement']
-                ).count()
-                sql_data["known_malicious_in_domain"] = malicious_scans
-
-                related_indicators = ThreatIndicator.objects.filter(
-                    scanindicator__scan__in=domain_scans
-                ).distinct()[:10]
-                
-                for ind in related_indicators:
-                    sql_data["historical_indicators"].append({
-                        "type": ind.indicator_type,
-                        "value": ind.indicator_value,
-                        "severity": ind.severity
-                    })
+            from User.services.historical_intelligence_service import HistoricalIntelligenceService
+            return HistoricalIntelligenceService.get_historical_intelligence(
+                url=url,
+                domain=host,
+                ip=ip,
+                exclude_scan_id=scan_id,
+                db_alias=db_alias
+            )
         except Exception as e:
             logger.warning(f"Error checking local SQL correlation: {e}")
-            sql_data["status"] = "ERROR"
-            sql_data["error"] = str(e)
-
-        return sql_data
+            return {
+                "status": "ERROR",
+                "error": str(e),
+                "previous_scans_count": 0,
+                "known_malicious_in_domain": 0,
+                "historical_indicators": [],
+                "domain_status": "UNKNOWN",
+                "exact_url_history": {"seen": False, "scan_count": 0},
+                "domain_history": {"seen": False, "scan_count": 0},
+                "ip_history": {"seen": False, "scan_count": 0},
+                "previous_indicators": [],
+                "repeated_indicators": [],
+                "summary": f"Historical lookup error: {e}",
+                "match_found": False,
+            }

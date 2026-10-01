@@ -147,6 +147,7 @@ class NikhilService:
             "module_statuses": module_statuses,
             "ai_display": ai_display,
             "threat_intel_display": threat_intel_display,
+            "evidence_data": evidence_data,
         }
         
         logger.info(f"Fallback complete for Scan {scan_id}: Final {result['final_classification']} (Risk: {result['risk_level']})")
