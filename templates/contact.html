@@ -1,3 +1,4 @@
+{% load static %}
 <!DOCTYPE html>
 <html>
 
@@ -23,14 +24,14 @@
   <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/font-awesome/4.3.0/css/font-awesome.min.css">
 
   <!-- bootstrap core css -->
-  <link rel="stylesheet" type="text/css" href="css/bootstrap.css" />
+  <link rel="stylesheet" type="text/css" href="{% static 'css/bootstrap.css' %}" />
 
   <!-- fonts style -->
   <link href="https://fonts.googleapis.com/css?family=Poppins:400,600,700&display=swap" rel="stylesheet">
   <!-- Custom styles for this template -->
-  <link href="css/style.css" rel="stylesheet" />
+  <link href="{% static 'css/style.css' %}" rel="stylesheet" />
   <!-- responsive style -->
-  <link href="css/responsive.css" rel="stylesheet" />
+  <link href="{% static 'css/responsive.css' %}" rel="stylesheet" />
 </head>
 
 <body class="sub_page">
@@ -39,10 +40,10 @@
     <header class="header_section">
       <div class="container">
         <nav class="navbar navbar-expand-lg custom_nav-container pt-3">
-          <a class="navbar-brand mr-5" href="index.html">
-            <img src="images/logo.png" alt="">
+          <a class="navbar-brand mr-5" href="/">
+            <img src="{% static 'images/logo.png' %}" alt="">
             <span>
-              Fregg
+              MaliciousBot
             </span>
           </a>
           <button class="navbar-toggler" type="button" data-toggle="collapse" data-target="#navbarSupportedContent"
@@ -107,7 +108,7 @@
           </div>
           <div class="col-md-6">
             <div class="img-box">
-              <img src="images/contact-img.jpg" alt="">
+              <img src="{% static 'images/contact-img.jpg' %}" alt="">
             </div>
           </div>
         </div>
@@ -128,16 +129,16 @@
       </div>
       <div class="box">
         <a href="" class="img-box">
-          <img src="images/location.png" alt="" class="img-1">
-          <img src="images/location-o.png" alt="" class="img-2">
+          <img src="{% static 'images/location.png' %}" alt="" class="img-1">
+          <img src="{% static 'images/location-o.png' %}" alt="" class="img-2">
         </a>
         <a href="" class="img-box">
-          <img src="images/call.png" alt="" class="img-1">
-          <img src="images/call-o.png" alt="" class="img-2">
+          <img src="{% static 'images/call.png' %}" alt="" class="img-1">
+          <img src="{% static 'images/call-o.png' %}" alt="" class="img-2">
         </a>
         <a href="" class="img-box">
-          <img src="images/envelope.png" alt="" class="img-1">
-          <img src="images/envelope-o.png" alt="" class="img-2">
+          <img src="{% static 'images/envelope.png' %}" alt="" class="img-1">
+          <img src="{% static 'images/envelope-o.png' %}" alt="" class="img-2">
         </a>
       </div>
     </div>
@@ -157,8 +158,8 @@
   </section>
   <!-- footer section -->
 
-  <script type="text/javascript" src="js/jquery-3.4.1.min.js"></script>
-  <script type="text/javascript" src="js/bootstrap.js"></script>
+  <script type="text/javascript" src="{% static 'js/jquery-3.4.1.min.js' %}"></script>
+  <script type="text/javascript" src="{% static 'js/bootstrap.js' %}"></script>
 
 </body>
 

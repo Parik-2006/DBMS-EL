@@ -56,11 +56,17 @@ coverage.xml
 db.sqlite3
 /media/
 staticfiles/
+screenshots/*.png
+!screenshots/.gitkeep
 *.sqlite3
+*.backup
+
 
 # Virtual environments
 .venv/
+.venv_canonical/
 venv/
+env/
 
 # VS Code
 .vscode/
@@ -79,6 +85,10 @@ Desktop.ini
 .env
 .env.*
 *.env
+
+# Temporary/debug scripts and local tests
+query_db_canonical.py
+tests_local/
 
 # Python cache artifacts
 *.pyc

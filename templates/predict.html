@@ -2,11 +2,302 @@
 {% block content %}
 {% load static %}
 
+<style>
+  /* Report container borders */
+  .report-container {
+    margin-top: 25px;
+    padding: 22px;
+    background-color: #ffffff;
+    border-radius: 10px;
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.08);
+    border-left: 6px solid #999;
+  }
+  .report-container.border-confident {
+    border-left-color: #28a745;
+  }
+  .report-container.border-uncertain {
+    border-left-color: #ff9800;
+  }
+
+  /* Report header */
+  .report-title {
+    margin-bottom: 15px;
+    font-weight: 700;
+    color: #1a202c;
+  }
+  .report-url {
+    margin-bottom: 12px;
+    font-size: 14px;
+  }
+  .report-url code {
+    word-break: break-all;
+    color: #2d3748;
+    background: #edf2f7;
+    padding: 3px 6px;
+    border-radius: 4px;
+  }
+
+  /* Confident result card */
+  .confident-card {
+    margin-top: 12px;
+    background: #f0fff4;
+    border: 1px solid #c6f6d5;
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .confident-card .card-header-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+  }
+  .confident-card .label-upper {
+    font-size: 13px;
+    font-weight: 600;
+    color: #22543d;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .confident-card .prediction-value {
+    font-size: 16px;
+    font-weight: bold;
+    color: #22543d;
+  }
+  .confident-card .confidence-row {
+    margin-bottom: 10px;
+    color: #2d3748;
+    font-size: 14px;
+  }
+  .confident-card .confidence-value {
+    font-weight: 700;
+    color: #22543d;
+  }
+  .confident-card .divider {
+    border-top: 1px solid #c6f6d5;
+    margin: 10px 0;
+  }
+  .confident-card .final-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .confident-card .final-label {
+    font-weight: 700;
+    font-size: 16px;
+    color: #22543d;
+  }
+  .confident-card .final-value {
+    font-size: 18px;
+    font-weight: 800;
+    color: #22543d;
+  }
+  .confident-card .pred-label {
+    color: #276749;
+  }
+  .confident-card .prediction-row {
+    margin-bottom: 8px;
+  }
+  .confident-card .badge-confident {
+    font-size: 12px;
+    padding: 5px 10px;
+  }
+
+  /* Stage 1: Initial ML Assessment (uncertain) */
+  .stage1-card {
+    background: #fffaf0;
+    border: 1px solid #feebc8;
+    border-radius: 8px;
+    padding: 14px;
+    margin-bottom: 14px;
+  }
+  .stage1-card .card-header-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 6px;
+  }
+  .stage1-card .label-upper {
+    font-size: 12px;
+    font-weight: 700;
+    color: #7b341e;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .stage1-card .badge-uncertain {
+    font-size: 11px;
+    padding: 4px 8px;
+    background-color: #ed8936;
+    color: white;
+  }
+  .stage1-card .content-row {
+    font-size: 14px;
+    color: #4a5568;
+  }
+  .stage1-card .highlight {
+    font-weight: 700;
+    color: #9c4221;
+  }
+
+  /* Stage 2: Deep Evidence Collectors */
+  .stage2-card {
+    background: #ebf8ff;
+    border: 1px solid #bee3f8;
+    border-radius: 8px;
+    padding: 14px;
+    margin-bottom: 14px;
+  }
+  .stage2-card .card-header-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+  }
+  .stage2-card .label-upper {
+    font-size: 12px;
+    font-weight: 700;
+    color: #2c5282;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .stage2-card .badge-completed {
+    font-size: 11px;
+    padding: 4px 8px;
+    background-color: #3182ce;
+    color: white;
+  }
+  .stage2-card .modules-grid {
+    font-size: 13px;
+  }
+  .stage2-card .module-item {
+    margin-bottom: 6px;
+  }
+
+  /* Stage 3: Evidence Corroboration */
+  .stage3-card {
+    background: #f7fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 14px;
+    margin-bottom: 14px;
+  }
+  .stage3-card .card-header-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+  }
+  .stage3-card .label-upper {
+    font-size: 12px;
+    font-weight: 700;
+    color: #4a5568;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .stage3-card .families-text {
+    margin-bottom: 6px;
+    font-size: 13px;
+  }
+  .stage3-card .family-badge {
+    border: 1px solid #cbd5e0;
+    margin-right: 4px;
+  }
+  .stage3-card .evidence-text {
+    margin-bottom: 8px;
+    font-size: 13px;
+    color: #2d3748;
+  }
+  .stage3-card .indicators-label {
+    margin-bottom: 4px;
+    font-size: 13px;
+  }
+  .stage3-card .indicators-container {
+    margin-bottom: 8px;
+  }
+  .stage3-card .indicator-code {
+    background: #fed7d7;
+    color: #9b2c2c;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 12px;
+    margin-right: 4px;
+    display: inline-block;
+    margin-bottom: 4px;
+  }
+  .stage3-card .mongo-ref {
+    margin-bottom: 0;
+    font-size: 12px;
+    color: #718096;
+  }
+
+  /* Stage 4: Final Fallback Classification */
+  .stage4-card {
+    background: #ffffff;
+    border: 2px solid #718096;
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .stage4-card.border-phishing,
+  .stage4-card.border-malware {
+    border-color: #e53e3e;
+  }
+  .stage4-card.border-defacement {
+    border-color: #dd6b20;
+  }
+  .stage4-card.border-benign {
+    border-color: #38a169;
+  }
+  .stage4-card .card-header-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 6px;
+  }
+  .stage4-card .label-upper {
+    font-size: 12px;
+    font-weight: 700;
+    color: #4a5568;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .stage4-card .risk-badge {
+    font-size: 12px;
+    padding: 4px 10px;
+  }
+  .stage4-card .final-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    margin-top: 4px;
+  }
+  .stage4-card .final-class {
+    margin: 0;
+    font-weight: 800;
+    color: #4a5568;
+  }
+  .stage4-card .final-class.text-phishing,
+  .stage4-card .final-class.text-malware {
+    color: #c53030;
+  }
+  .stage4-card .final-class.text-defacement {
+    color: #c05621;
+  }
+  .stage4-card .final-class.text-benign {
+    color: #276749;
+  }
+  .stage4-card .initial-ref {
+    font-size: 13px;
+    color: #718096;
+  }
+
+  /* Form submit button spacing */
+  .predict-submit-btn {
+    margin-top: 15px;
+  }
+</style>
 
 <div class="body_bg layout_padding">
- <!-- contact section -->
-
- <section class="contact_section">
+  <!-- contact section -->
+  <section class="contact_section">
     <div class="container">
       <div class="heading_container">
         <h2>
@@ -16,43 +307,244 @@
     </div>
     <div class="container contact_bg layout_padding2-top">
       <div class="row">
-        <div class="col-md-6">
-          <div class="contact_form ">
-            <form method="post">
-                {% csrf_token %}
-              <textarea name="url" rows="5" cols="80" 
-              placeholder="Enter URL to check" required></textarea>
-              
-               <button type="submit">
+        <div class="col-md-7">
+          <div class="contact_form">
+            <form method="post" action="">
+              {% csrf_token %}
+              <textarea name="url" rows="4" cols="80"
+                placeholder="Enter URL to check (e.g. https://example.com)" required></textarea>
+
+              <button type="submit" class="predict-submit-btn">
                 Predict
               </button>
             </form>
-            
+
             {% if prediction %}
-            <div style="margin-top: 20px; padding: 15px; background-color: #f0f0f0; border-radius: 5px;">
-              <h4>Prediction Result:</h4>
-              <p><strong>URL:</strong> {{ url }}</p>
-              <p><strong>Prediction:</strong> {{ prediction }}</p>
-              {% if prediction_type %}
-              <p><strong>Type:</strong> {{ prediction_type }}</p>
+            <div class="report-container {% if is_confident %}border-confident{% else %}border-uncertain{% endif %}">
+              <h4 class="report-title">Security Analysis Report</h4>
+              <p class="report-url"><strong>Target URL:</strong> <code>{{ url }}</code></p>
+
+              {% if is_confident %}
+              <!-- CONFIDENT RESULT -->
+              <div class="confident-card">
+                <div class="card-header-row">
+                  <span class="label-upper">INITIAL ML EVALUATION</span>
+                  <span class="badge badge-success badge-confident">CONFIDENT</span>
+                </div>
+                <div class="prediction-row">
+                  <strong class="pred-label">Initial ML Prediction:</strong> <span class="prediction-value">{{ prediction_type }}</span>
+                </div>
+                <div class="confidence-row">
+                  <strong>Model Confidence:</strong> <span class="confidence-value">{{ confidence }}</span> &ge; 75.00% threshold
+                </div>
+                <hr class="divider">
+                <div class="final-row">
+                  <span class="final-label">Final Classification:</span>
+                  <span class="final-value">{{ prediction_type }}</span>
+                </div>
+              </div>
+
+              {% else %}
+              <!-- UNCERTAIN RESULT WITH DEEP FALLBACK ANALYSIS -->
+              <!-- Stage 1: Initial ML Assessment -->
+              <div class="stage1-card">
+                <div class="card-header-row">
+                  <span class="label-upper">STAGE 1 &mdash; INITIAL ML EVALUATION</span>
+                  <span class="badge badge-uncertain">UNCERTAIN (&lt; 75%)</span>
+                </div>
+                <div class="content-row">
+                  <strong>Initial ML Prediction:</strong> <span class="highlight">{{ initial_prediction }}</span> &nbsp;|&nbsp;
+                  <strong>Confidence:</strong> <span class="highlight">{{ initial_confidence }}</span>
+                  <span class="text-muted small">(Below 75% threshold &rarr; routed to Nikhil Fallback)</span>
+                </div>
+              </div>
+
+              <!-- Stage 2: Fallback Deep Analysis Modules Status -->
+              <div class="stage2-card">
+                <div class="card-header-row">
+                  <span class="label-upper">STAGE 2 &mdash; DEEP EVIDENCE COLLECTORS</span>
+                  <span class="badge badge-completed">COMPLETED</span>
+                </div>
+                <div class="row modules-grid">
+                  <div class="col-sm-6 module-item">
+                    <strong>Webpage Analysis:</strong>
+                    {% if module_statuses.webpage == 'SUCCESS' %}
+                    <span class="badge badge-success">SUCCESS</span>
+                    {% elif module_statuses.webpage == 'SKIPPED' %}
+                    <span class="badge badge-secondary">SKIPPED</span>
+                    {% else %}
+                    <span class="badge badge-secondary">{{ module_statuses.webpage|default:'COMPLETED' }}</span>
+                    {% endif %}
+                  </div>
+                  <div class="col-sm-6 module-item">
+                    <strong>Network Analysis:</strong>
+                    {% if module_statuses.network == 'SUCCESS' %}
+                    <span class="badge badge-success">SUCCESS</span>
+                    {% else %}
+                    <span class="badge badge-secondary">{{ module_statuses.network|default:'COMPLETED' }}</span>
+                    {% endif %}
+                  </div>
+                  <div class="col-sm-6 module-item">
+                    <strong>Visual Analysis:</strong>
+                    {% if module_statuses.visual == 'SUCCESS' %}
+                    <span class="badge badge-success">SUCCESS</span>
+                    {% else %}
+                    <span class="badge badge-secondary" title="Browser automation offline/isolated">UNAVAILABLE</span>
+                    {% endif %}
+                  </div>
+                  <div class="col-sm-6 module-item">
+                    <strong>Threat Intelligence:</strong>
+                    {% if module_statuses.threat_intelligence == 'SUCCESS' %}
+                      {% if threat_intel_display.positive_hits > 0 %}
+                        <span class="badge badge-danger">HITS FOUND ({{ threat_intel_display.positive_hits }})</span>
+                      {% else %}
+                        <span class="badge badge-success">SUCCESS</span>
+                      {% endif %}
+                      <small class="d-block text-muted mt-1">{{ threat_intel_display.ui_summary|default:'3 sources checked · No malicious indicators found in checked sources' }}</small>
+                    {% elif module_statuses.threat_intelligence == 'PARTIAL' %}
+                      <span class="badge badge-warning">PARTIAL</span>
+                      <small class="d-block text-muted mt-1">{{ threat_intel_display.ui_summary }}</small>
+                    {% elif module_statuses.threat_intelligence == 'RATE_LIMITED' %}
+                      <span class="badge badge-warning">RATE LIMITED</span>
+                      <small class="d-block text-muted mt-1">External TI rate limited · Local SQL correlation active</small>
+                    {% elif module_statuses.threat_intelligence == 'CONFIGURED' %}
+                      <span class="badge badge-info">CONFIGURED</span>
+                    {% else %}
+                      <span class="badge badge-secondary" title="External TI sources unavailable; Local SQL/Domain correlation active">UNAVAILABLE</span>
+                      <small class="d-block text-muted mt-1">External TI sources unavailable · Local SQL active</small>
+                    {% endif %}
+                  </div>
+                  <div class="col-sm-6 module-item">
+                    <strong>Prompt Injection:</strong>
+                    {% if module_statuses.prompt_injection == 'DETECTED' %}
+                    <span class="badge badge-danger">DETECTED</span>
+                    {% else %}
+                    <span class="badge badge-success">NOT DETECTED</span>
+                    {% endif %}
+                  </div>
+                  <div class="col-sm-6 module-item">
+                    <strong>AI Analysis:</strong>
+                    {% if ai_display.status == 'SUCCESS' or ai_display.status == 'COMPLETED' %}
+                    <span class="badge badge-success">COMPLETED</span>
+                    <small class="d-block text-muted mt-1">
+                      Deterministic evidence insufficient &mdash; AI evidence analysis requested
+                      {% if ai_display.provider %}<br>Provider: {{ ai_display.provider }}{% if ai_display.model %} ({{ ai_display.model }}){% endif %}{% endif %}
+                      {% if ai_display.assessment %} | Assessment: {{ ai_display.assessment }}{% endif %}
+                    </small>
+                    {% elif ai_display.status == 'NOT_RUN' %}
+                    <span class="badge badge-info">NOT RUN</span>
+                    <small class="d-block text-muted mt-1">{{ ai_display.gatekeeper_reason|default:"Deterministic evidence sufficient — AI not required"|truncatechars:100 }}</small>
+                    {% elif ai_display.status == 'RATE_LIMITED' %}
+                    <span class="badge badge-warning">RATE LIMITED</span>
+                    <small class="d-block text-muted mt-1">Deterministic evidence insufficient; AI provider rate limited &mdash; Deterministic analysis continued</small>
+                    {% elif ai_display.status == 'QUOTA_EXCEEDED' %}
+                    <span class="badge badge-warning">QUOTA EXCEEDED</span>
+                    <small class="d-block text-muted mt-1">Deterministic evidence insufficient; AI quota exceeded &mdash; Deterministic analysis continued</small>
+                    {% elif ai_display.status == 'UNAVAILABLE' %}
+                    <span class="badge badge-secondary">UNAVAILABLE</span>
+                    <small class="d-block text-muted mt-1">
+                      Deterministic evidence insufficient; AI provider unavailable
+                    </small>
+                    {% elif module_statuses.ai == 'MOCK' %}
+                    <span class="badge badge-secondary">NOT AVAILABLE</span>
+                    {% else %}
+                    <span class="badge badge-secondary">{{ ai_display.status|default:module_statuses.ai|default:'NOT AVAILABLE' }}</span>
+                    {% endif %}
+                  </div>
+                </div>
+              </div>
+
+              <!-- Stage 3: Multi-Family Corroboration and Evidence Summary -->
+              <div class="stage3-card">
+                <div class="card-header-row">
+                  <span class="label-upper">STAGE 3 &mdash; EVIDENCE CORROBORATION</span>
+                  <span class="badge badge-{% if corroboration.strength == 'STRONG' %}success{% elif corroboration.strength == 'MODERATE' %}info{% elif corroboration.strength == 'WEAK' %}warning{% else %}secondary{% endif %}">
+                    {{ corroboration.independent_families|default:0 }} INDEPENDENT FAMILIES ({{ corroboration.strength|default:'INSUFFICIENT' }})
+                  </span>
+                </div>
+
+                {% if corroboration.families_used %}
+                <p class="families-text">
+                  <strong>Evidence Families Used:</strong>
+                  {% for fam in corroboration.families_used %}
+                  <span class="badge badge-light family-badge">{{ fam }}</span>
+                  {% endfor %}
+                </p>
+                {% endif %}
+
+                {% if evidence_summary %}
+                <p class="evidence-text">
+                  <strong>Evidence Summary:</strong> {{ evidence_summary }}
+                </p>
+                {% endif %}
+
+                {% if threat_indicators %}
+                <p class="indicators-label"><strong>Observed Threat Indicators:</strong></p>
+                <div class="indicators-container">
+                  {% for ind in threat_indicators %}
+                  <code class="indicator-code">{{ ind }}</code>
+                  {% endfor %}
+                </div>
+                {% endif %}
+
+                {% if mongo_ref %}
+                <p class="mongo-ref">
+                  <strong>MongoDB Case Reference:</strong> <code>{{ mongo_ref }}</code>
+                </p>
+                {% endif %}
+
+                {% if threat_intel_display %}
+                <div class="mt-3 p-2 rounded" style="background: #edf2f7; font-size: 12px; border: 1px solid #e2e8f0;">
+                  <div class="d-flex justify-content-between align-items-center mb-1">
+                    <strong style="color: #2d3748; text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px;">Threat Intelligence Sources:</strong>
+                    <span class="text-muted small" style="font-size: 11px;">{% if threat_intel_display.positive_hits > 0 %}{{ threat_intel_display.positive_hits }} malicious IOC(s) flagged{% else %}Threat intelligence: No malicious indicators found in checked sources{% endif %}</span>
+                  </div>
+                  <div class="row mt-1 text-muted">
+                    <div class="col-sm-4"><strong>ThreatFox:</strong> <span class="badge {% if threat_intel_display.threatfox == 'SUCCESS' and threat_intel_display.threatfox_hits > 0 %}badge-danger{% elif threat_intel_display.threatfox == 'SUCCESS' or threat_intel_display.threatfox == 'NO_MATCH' %}badge-success{% else %}badge-secondary{% endif %}">{% if threat_intel_display.threatfox_hits > 0 %}{{ threat_intel_display.threatfox_hits }} HIT(S){% else %}{{ threat_intel_display.threatfox|default:'NO MATCH' }}{% endif %}</span></div>
+                    <div class="col-sm-4"><strong>URLhaus:</strong> <span class="badge {% if threat_intel_display.urlhaus == 'SUCCESS' and threat_intel_display.urlhaus_hits > 0 %}badge-danger{% elif threat_intel_display.urlhaus == 'SUCCESS' or threat_intel_display.urlhaus == 'NO_MATCH' %}badge-success{% else %}badge-secondary{% endif %}">{% if threat_intel_display.urlhaus_hits > 0 %}{{ threat_intel_display.urlhaus_hits }} HIT(S){% else %}{{ threat_intel_display.urlhaus|default:'NO MATCH' }}{% endif %}</span></div>
+                    <div class="col-sm-4"><strong>AbuseIPDB:</strong> <span class="badge {% if threat_intel_display.abuseipdb_score >= 25 %}badge-danger{% elif threat_intel_display.abuseipdb == 'SUCCESS' or threat_intel_display.abuseipdb == 'NO_MATCH' %}badge-success{% else %}badge-secondary{% endif %}">{{ threat_intel_display.abuseipdb_score|default:0 }}% abuse</span></div>
+                  </div>
+                  <div class="row mt-1 text-muted">
+                    <div class="col-sm-6"><strong>Local SQL:</strong> {% if threat_intel_display.local_sql_malicious > 0 %}<span class="text-danger">{{ threat_intel_display.local_sql_malicious }} historical malicious</span>{% else %}No historical indicator{% endif %}</div>
+                    <div class="col-sm-6"><strong>Trusted Domain:</strong> {{ threat_intel_display.trusted_domain|default:'Not Listed' }}</div>
+                  </div>
+                </div>
+                {% endif %}
+              </div>
+
+              <!-- Stage 4: Final Fallback Classification -->
+              <div class="stage4-card {% if final_classification == 'Phishing' %}border-phishing{% elif final_classification == 'Malware' %}border-malware{% elif final_classification == 'Defacement' %}border-defacement{% elif final_classification == 'Benign' %}border-benign{% endif %}">
+                <div class="card-header-row">
+                  <span class="label-upper">STAGE 4 &mdash; FINAL FALLBACK CLASSIFICATION</span>
+                  <span class="badge badge-{% if risk_level == 'CRITICAL' %}danger{% elif risk_level == 'HIGH' %}warning{% elif risk_level == 'MEDIUM' %}secondary{% else %}success{% endif %} risk-badge">
+                    RISK: {{ risk_level }} (Score: {{ risk_score }})
+                  </span>
+                </div>
+                <div class="final-row">
+                  <h4 class="final-class {% if final_classification == 'Phishing' %}text-phishing{% elif final_classification == 'Malware' %}text-malware{% elif final_classification == 'Defacement' %}text-defacement{% elif final_classification == 'Benign' %}text-benign{% endif %}">
+                    {{ final_classification }}
+                  </h4>
+                  <span class="initial-ref">(Separated from initial ML: {{ initial_prediction }})</span>
+                </div>
+                <div class="mt-2 text-muted small" style="font-size: 11px;">
+                  Final classification based on corroborated available evidence
+                </div>
+              </div>
               {% endif %}
+
             </div>
             {% endif %}
           </div>
         </div>
-        <div class="col-md-6">
+        <div class="col-md-5">
           <div class="img-box">
-            <img src="images/contact-img.jpg" alt="">
+            <img src="{% static 'images/contact-img.jpg' %}" alt="Security analysis illustration">
           </div>
         </div>
       </div>
     </div>
   </section>
-
   <!-- end contact section -->
-
 </div>
-
-
 
 {% endblock %}
