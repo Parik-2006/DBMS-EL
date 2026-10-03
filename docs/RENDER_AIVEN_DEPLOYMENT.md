@@ -292,8 +292,8 @@ These are enforced in code and covered by tests. Deployment does not relax them.
    trained lazily.
 2. **No persistent filesystem.** Screenshots and uploaded artifacts are lost on
    restart and redeploy. Only MySQL and MongoDB data persists.
-3. **512 MB RAM.** The `xgboost` / `scikit-learn` / `pandas` stack plus the
-   RandomForest training is memory-hungry. Use `--workers 1` to avoid memory
+3. **512 MB RAM.** The PARI ML pipeline uses `scikit-learn` RandomForest and `pandas`,
+   and model training is memory-hungry. Use `--workers 1` to avoid memory
    duplication from multiple worker processes.
 4. **~750 hours/month** of combined free usage; instances spin down outside that.
 5. **No Playwright browsers** (see §8).
