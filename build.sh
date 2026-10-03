@@ -6,9 +6,11 @@ set -o errexit
 pip install -r requirements.txt
 
 # Install the Chromium browser used by VisualAnalyzer.
-# Bundle it with the Python package so the deployed Render runtime can find it.
+# Render's native Python build image does not allow Playwright to switch to root
+# for --with-deps, so install the browser binary without OS package installation.
+# The Render image supplies the runtime libraries needed by Chromium.
 export PLAYWRIGHT_BROWSERS_PATH=0
-python -m playwright install --with-deps chromium
+python -m playwright install chromium
 
 # Collect static files
 python manage.py collectstatic --noinput
