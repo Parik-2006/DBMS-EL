@@ -71,8 +71,8 @@ class FallbackOrchestrator:
                 logger.warning(f"Could not extract PARI features for {url}: {e}")
                 pari_features = None
 
-        # 1-3. Concurrently execute independent initial evidence collectors (Webpage, Network, Visual)
-        # using a bounded thread pool (3 workers) to overlap network I/O without exceeding Render Free limits.
+        # Webpage and network checks are safe to overlap. Chromium is much heavier,
+        # so visual analysis runs separately to reduce Render Free memory pressure.
         import concurrent.futures
 
         def _run_webpage():
@@ -89,20 +89,17 @@ class FallbackOrchestrator:
                 logger.error(f"Network analysis exception for Scan {scan_id}: {e}")
                 return {"status": "ERROR", "error": str(e), "network_findings": []}
 
-        def _run_visual():
-            try:
-                return self.visual_analyzer.analyze_visual(url, scan_id=scan_id)
-            except Exception as e:
-                logger.error(f"Visual analysis exception for Scan {scan_id}: {e}")
-                return {"status": "UNAVAILABLE", "error": str(e), "visual_findings": []}
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
             fut_webpage = executor.submit(_run_webpage)
             fut_network = executor.submit(_run_network)
-            fut_visual = executor.submit(_run_visual)
             webpage_evidence = fut_webpage.result()
             network_evidence = fut_network.result()
-            visual_evidence = fut_visual.result()
+
+        try:
+            visual_evidence = self.visual_analyzer.analyze_visual(url, scan_id=scan_id)
+        except Exception as e:
+            logger.error(f"Visual analysis exception for Scan {scan_id}: {e}")
+            visual_evidence = {"status": "UNAVAILABLE", "error": str(e), "visual_findings": []}
 
         # 4. Threat Intelligence & Trusted Domain Intelligence
         try:

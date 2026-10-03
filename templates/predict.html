@@ -138,6 +138,31 @@
     color: #9c4221;
   }
 
+  .visual-snapshot {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid #bee3f8;
+  }
+  .visual-snapshot-title {
+    margin-bottom: 8px;
+    font-size: 13px;
+    font-weight: 700;
+    color: #2c5282;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .visual-snapshot img {
+    display: block;
+    width: 100%;
+    max-width: 900px;
+    max-height: 520px;
+    object-fit: contain;
+    object-position: top;
+    background: #ffffff;
+    border: 1px solid #cbd5e0;
+    border-radius: 8px;
+  }
+
   /* Stage 2: Deep Evidence Collectors */
   .stage2-card {
     background: #ebf8ff;
@@ -452,6 +477,15 @@
                     {% endif %}
                   </div>
                 </div>
+
+                {% if visual_snapshot %}
+                <div class="visual-snapshot">
+                  <div class="visual-snapshot-title">Visual Snapshot</div>
+                  <a href="{{ visual_snapshot }}" target="_blank" rel="noopener noreferrer">
+                    <img src="{{ visual_snapshot }}" alt="Captured screenshot of the analyzed URL" loading="lazy">
+                  </a>
+                </div>
+                {% endif %}
               </div>
 
               <!-- Stage 3: Multi-Family Corroboration and Evidence Summary -->

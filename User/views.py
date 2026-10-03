@@ -674,6 +674,11 @@ def predict(request):
                     module_statuses = analysis_result.get('module_statuses', {})
                     evidence_breakdown = analysis_result.get('evidence_breakdown', {})
                     ai_display = analysis_result.get('ai_display', {})
+                    visual_snapshot = (
+                        analysis_result.get('evidence_data', {})
+                        .get('visual', {})
+                        .get('screenshot_reference')
+                    )
 
                     prediction_result = f"Deep Analysis Result: {final_classification} (Risk: {risk_level}, Score: {risk_score:.2f})"
                     prediction_type = final_classification
@@ -707,6 +712,7 @@ def predict(request):
                         'module_statuses': module_statuses,
                         'evidence_breakdown': evidence_breakdown,
                         'ai_display': ai_display,
+                        'visual_snapshot': visual_snapshot,
                         'threat_intel_display': analysis_result.get('threat_intel_display', {}),
                         'prediction': prediction_result,
                         'prediction_type': final_classification,

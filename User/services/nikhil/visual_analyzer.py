@@ -14,8 +14,8 @@ class VisualAnalyzer:
     returns status = UNAVAILABLE without faking screenshot success.
     """
     
-    NAVIGATION_TIMEOUT_MS = 5000  # 5 seconds
-    TOTAL_TIMEOUT_MS = 10000       # 10 seconds
+    NAVIGATION_TIMEOUT_MS = 8000  # 8 seconds
+    TOTAL_TIMEOUT_MS = 12000       # 12 seconds
 
     @classmethod
     def analyze_visual(cls, url, scan_id=None):
@@ -39,6 +39,11 @@ class VisualAnalyzer:
             "error": None,
             "timestamp": time.time()
         }
+
+        # Render bundles Chromium with PLAYWRIGHT_BROWSERS_PATH=0 during build.
+        # Set it again at runtime so Playwright resolves the bundled browser.
+        if os.environ.get('RENDER') and not os.environ.get('PLAYWRIGHT_BROWSERS_PATH'):
+            os.environ['PLAYWRIGHT_BROWSERS_PATH'] = '0'
 
         # Try Playwright
         try:
@@ -75,7 +80,7 @@ class VisualAnalyzer:
                 page.set_default_timeout(cls.TOTAL_TIMEOUT_MS)
                 
                 target_url = url if url.startswith(('http://', 'https://')) else f"http://{url}"
-                page.goto(target_url, wait_until="load")
+                page.goto(target_url, wait_until="domcontentloaded")
                 
                 evidence["title"] = page.title()
                 

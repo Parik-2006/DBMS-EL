@@ -1,6 +1,7 @@
 from django.urls import path 
 from . import views
 from . import api
+from .screenshot_views import serve_screenshot
 
 urlpatterns=[
     path('',views.index,name='index'),
@@ -14,6 +15,7 @@ urlpatterns=[
     path('adminhome',views.adminhome,name='adminhome'),
     path('health',views.health,name='health'),
     path('status',views.status,name='status'),
+    path('media/screenshots/<str:filename>', serve_screenshot, name='serve_screenshot'),
     
     path('api/fallback/result/', api.fallback_result, name='fallback_result'),
     path('api/fallback/uncertain-scans/', api.uncertain_scans, name='uncertain_scans'),
