@@ -142,19 +142,28 @@ def ensure_mysql_database_exists(database_name):
     try:
         cursor = conn.cursor()
         cursor.execute(
-            f"CREATE DATABASE IF NOT EXISTS `{database_name}` "
-            f"CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+            "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = %s",
+            (database_name,)
         )
-        app_user = os.environ.get('MYSQL_USER', 'maliciousbot_app')
-        for host in ['localhost', '127.0.0.1']:
-            try:
-                cursor.execute(
-                    f"GRANT ALL PRIVILEGES ON `{database_name}`.* TO '{app_user}'@'{host}'"
-                )
-            except Exception:
-                pass
-        cursor.execute("FLUSH PRIVILEGES")
+        row = cursor.fetchone() if hasattr(cursor, 'fetchone') else None
+        created = False
+        if row is None:
+            cursor.execute(
+                f"CREATE DATABASE `{database_name}` "
+                f"CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+            )
+            created = True
+            app_user = os.environ.get('MYSQL_USER', 'maliciousbot_app')
+            for host in ['localhost', '127.0.0.1']:
+                try:
+                    cursor.execute(
+                        f"GRANT ALL PRIVILEGES ON `{database_name}`.* TO '{app_user}'@'{host}'"
+                    )
+                except Exception:
+                    pass
+            cursor.execute("FLUSH PRIVILEGES")
         conn.commit()
+        return created
     finally:
         conn.close()
 
@@ -165,6 +174,96 @@ def register_database_connection(db_alias, database_name):
     """
     if db_alias not in connections.databases:
         connections.databases[db_alias] = get_mysql_db_config(database_name)
+
+def get_user_database_models():
+    """
+    Return the canonical list of models that belong to an isolated user database,
+    ordered topologically so that referenced parent tables precede dependent child tables.
+    Source of truth: Django model classes filtered by UserDatabaseRouter.
+    """
+    from django.apps import apps
+    ordered_labels = [
+        ('contenttypes', 'ContentType'),
+        ('User', 'Domain'),
+        ('User', 'IP'),
+        ('User', 'ThreatIndicator'),
+        ('User', 'HistoryClearEvent'),
+        ('User', 'MaliciousBot'),
+        ('User', 'URL'),
+        ('User', 'Scan'),
+        ('User', 'AnalystReview'),
+        ('User', 'Prediction'),
+        ('User', 'ScanFeatures'),
+        ('User', 'ScanFallbackResult'),
+        ('User', 'ScanEvidenceSummary'),
+        ('User', 'ScanAIEvidence'),
+        ('User', 'ScanFinalDecision'),
+        ('User', 'ScanIndicator'),
+    ]
+    return [apps.get_model(app_label, model_name) for app_label, model_name in ordered_labels]
+
+def fast_bootstrap_user_database(db_alias):
+    """
+    Fast bootstrap path for a brand-new per-user database.
+    - Directly constructs the current schema from the Django model definitions
+      using connection.schema_editor() rather than replaying historical migrations (0001-0011).
+    - Ensures foreign key constraints, indexes, and column definitions match the current models.
+    - Records all migration dependency nodes in django_migrations in a single bulk operation,
+      leaving Django's migration history completely consistent for future migrations.
+    """
+    import time
+    from django.utils import timezone
+    from django.db.migrations.recorder import MigrationRecorder
+    from django.db.migrations.loader import MigrationLoader
+
+    t0 = time.perf_counter()
+    connection = connections[db_alias]
+
+    # Disable foreign key checks on MySQL during schema creation to prevent ordering edge cases
+    is_mysql = getattr(connection, 'vendor', '') == 'mysql'
+    if is_mysql:
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SET FOREIGN_KEY_CHECKS=0")
+        except Exception as e:
+            logger.debug(f"[PROVISION-FAST] notice disabling fk checks: {e}")
+
+    try:
+        # Introspect existing tables to ensure table creation is fully idempotent
+        with connection.cursor() as cursor:
+            existing_tables = {t.lower() for t in connection.introspection.table_names(cursor)}
+
+        models = get_user_database_models()
+        with connection.schema_editor() as schema_editor:
+            for model in models:
+                table_name = model._meta.db_table.lower()
+                if table_name not in existing_tables:
+                    schema_editor.create_model(model)
+                    existing_tables.add(table_name)
+    finally:
+        if is_mysql:
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute("SET FOREIGN_KEY_CHECKS=1")
+            except Exception as e:
+                logger.debug(f"[PROVISION-FAST] notice restoring fk checks: {e}")
+
+    t_tables = time.perf_counter()
+    logger.info(f"[PROVISION-FAST] tables verified/created in {(t_tables - t0):.3f}s: {db_alias}")
+
+    # Record migration state in django_migrations
+    recorder = MigrationRecorder(connection)
+    recorder.ensure_schema()
+    loader = MigrationLoader(connection)
+    now = timezone.now()
+
+    records = [
+        recorder.Migration(app=node[0], name=node[1], applied=now)
+        for node in loader.graph.nodes
+    ]
+    recorder.migration_qs.bulk_create(records, ignore_conflicts=True)
+    t_end = time.perf_counter()
+    logger.info(f"[PROVISION-FAST] {len(records)} migration records registered in {(t_end - t_tables):.3f}s (total: {(t_end - t0):.3f}s): {db_alias}")
 
 def reconcile_user_database_migrations(db_alias):
     """
@@ -255,22 +354,31 @@ def reconcile_user_database_migrations(db_alias):
         raise
     logger.info(f"[PROVISION] migration completed: {db_alias}")
 
+_guest_db_ready = False
+
 def ensure_user_database(user):
     """
     Resolve and prepare the isolated MySQL database for a user.
     - If user is unauthenticated or None, routes to 'guest_db' (maliciousbot_guest).
     - If user is authenticated, resolves maliciousbot_user_XXXXXX,
-      ensures database exists on MySQL, registers connection, applies/reconciles user migrations,
-      and tracks in user_database_registry.
+      ensures database exists on MySQL, registers connection, applies fast bootstrap
+      or reconciles user migrations, and tracks in user_database_registry.
     Returns the database alias string to be used for routing.
     """
+    import time
     from User.models import UserDatabaseRegistry
 
     if user is None or not getattr(user, 'is_authenticated', False):
-        db_name = 'maliciousbot_guest'
+        global _guest_db_ready
+        db_name = os.environ.get('MYSQL_GUEST_DATABASE', 'maliciousbot_guest')
         db_alias = 'guest_db'
-        ensure_mysql_database_exists(db_name)
         register_database_connection(db_alias, db_name)
+        if not _guest_db_ready:
+            try:
+                ensure_mysql_database_exists(db_name)
+            except Exception as e:
+                logger.warning(f"[PROVISION] guest database check notice: {e}")
+            _guest_db_ready = True
         return db_alias
 
     user_id = user.id
@@ -298,20 +406,32 @@ def ensure_user_database(user):
             )
             return db_alias
 
+        t_start = time.perf_counter()
         logger.info(f"[PROVISION] start: user_id={user_id} db={db_name}")
 
         # 1. Ensure MySQL database exists on server (Case A: creates, Case C/D: no-op)
-        ensure_mysql_database_exists(db_name)
-        logger.info(f"[PROVISION] database exists/created: {db_name}")
+        t_db = time.perf_counter()
+        created = ensure_mysql_database_exists(db_name)
+        logger.info(f"[PROVISION-TIMING] database check/create (created={created}) took {(time.perf_counter() - t_db):.3f}s: {db_name}")
 
         # 2. Register dynamic Django connection
+        t_conn = time.perf_counter()
         register_database_connection(db_alias, db_name)
-        logger.info(f"[PROVISION] connection registered: {db_alias}")
+        logger.info(f"[PROVISION-TIMING] connection registered in {(time.perf_counter() - t_conn):.3f}s: {db_alias}")
 
-        # 3. Apply / reconcile migrations (handles Case A, Case C, Case D)
-        reconcile_user_database_migrations(db_alias)
+        # 3. Apply schema: fast bootstrap for brand-new DBs, reconcile for existing DBs
+        t_schema = time.perf_counter()
+        if created:
+            logger.info(f"[PROVISION] fresh database detected; executing fast bootstrap: {db_alias}")
+            fast_bootstrap_user_database(db_alias)
+            logger.info(f"[PROVISION-TIMING] fast schema bootstrap took {(time.perf_counter() - t_schema):.3f}s: {db_alias}")
+        else:
+            logger.info(f"[PROVISION] existing database on server; reconciling migrations: {db_alias}")
+            reconcile_user_database_migrations(db_alias)
+            logger.info(f"[PROVISION-TIMING] migration reconciliation took {(time.perf_counter() - t_schema):.3f}s: {db_alias}")
 
         # 4. Atomically create or update registry row in control database (default)
+        t_reg = time.perf_counter()
         UserDatabaseRegistry.objects.using('default').update_or_create(
             user_id=user_id,
             defaults={
@@ -321,7 +441,7 @@ def ensure_user_database(user):
                 'last_used_at': timezone.now(),
             }
         )
-        logger.info(f"[PROVISION] registry reconciled: user_id={user_id} db={db_name}")
-        logger.info(f"[PROVISION] provisioning complete: {db_alias}")
+        logger.info(f"[PROVISION-TIMING] registry update took {(time.perf_counter() - t_reg):.3f}s: {db_alias}")
+        logger.info(f"[PROVISION-TIMING] total provisioning took {(time.perf_counter() - t_start):.3f}s: {db_alias}")
 
     return db_alias

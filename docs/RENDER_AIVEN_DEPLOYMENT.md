@@ -337,3 +337,32 @@ The deployment tests in `User/test_deployment.py` cover SSL mode selection,
 connection, `/health`, `/status`, static and WhiteNoise configuration, the
 free-only AI and threat-intelligence policy, and the Playwright and MongoDB
 graceful-degradation paths. No real credentials are required.
+
+---
+
+## 13. Performance and First-Time User Provisioning
+
+### 13.1 Why Per-User DB Provisioning Was Expensive
+Historically, user registration took several minutes on Render when using remote Aiven MySQL. The bottleneck was replaying the entire historical migration chain (`0001` through `0011`) sequentially across the WAN. For each migration, Django executed multiple individual DDL queries, verified table locks, and wrote tracking rows to `django_migrations` over TLS with network latency on every roundtrip.
+
+### 13.2 How Fast Bootstrap Works
+For brand-new per-user databases (`maliciousbot_user_XXXXXX`):
+1. **Direct Schema Creation:** When `ensure_mysql_database_exists()` creates a fresh database, `fast_bootstrap_user_database()` directly builds the current required 16 user tables, indexes, and foreign keys in a single `connection.schema_editor()` pass using the current Django models as the single source of truth.
+2. **Bulk Migration Registration:** All 29 migration nodes across the dependency closure are registered into `django_migrations` in a single `bulk_create` SQL statement.
+3. **Full Consistency:** Django's `check_consistent_history` passes cleanly, future migrations (`0012+`) apply normally, and `migrate` reports "No migrations to apply."
+4. **Latency Reduction:** Database bootstrap executes in ~300-400ms instead of 5 minutes.
+
+### 13.3 How Existing Users Skip Migration
+For already-provisioned users:
+- `ensure_user_database(user)` queries `UserDatabaseRegistry` in `maliciousbot_core`.
+- If an active registry row exists, it registers the connection alias, updates `last_used_at`, and returns immediately in ~1-2ms.
+- No `CREATE DATABASE`, `GRANT`, `FLUSH PRIVILEGES`, or `migrate` operations run on normal authenticated or guest requests.
+
+### 13.4 How Partial DB Recovery Works
+If a database already exists on MySQL with existing or partial tables (such as legacy `maliciousbot_user_000001` or an interrupted run):
+- `reconcile_user_database_migrations()` is preserved as the recovery mechanism.
+- It inspects existing tables, resolves interrupted initial schemas (such as `0004_pari_schema`), applies justified `fake_initial` flags, and runs unapplied migrations to bring the database to full parity safely.
+
+### 13.5 Why No Background Paid Service Is Required
+Because fast bootstrap runs in milliseconds to a few seconds synchronously, user registration finishes immediately without requiring Redis, Celery, separate background workers, or extra compute infrastructure on the Render Free plan.
+

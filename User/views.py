@@ -13,6 +13,7 @@ import hashlib
 from urllib.parse import urlparse
 import os
 import traceback
+import threading
 
 # ML imports - made optional for local development
 try:
@@ -40,6 +41,7 @@ except ImportError:
 # Global pipeline variable
 pipeline = None
 model_trained = False
+_model_training_lock = threading.Lock()
 
 # Define helper functions
 def hash_encode(category):
@@ -220,6 +222,13 @@ def train_model():
     if pipeline is not None and model_trained:
         return True  # Already trained
 
+    with _model_training_lock:
+        if pipeline is not None and model_trained:
+            return True
+        return _do_train_model()
+
+def _do_train_model():
+    global pipeline, model_trained
     try:
         # Load and preprocess data
         urls_data = pd.read_csv(r'static/dataset/Phishing.csv')
@@ -375,12 +384,18 @@ def register(request):
             # Create user in control database and provision isolated user MySQL database
             created_user = None
             try:
+                import time
+                t0 = time.perf_counter()
                 print(f"[REGISTER] Creating user: {username}")
                 created_user = User.objects.create_user(username=username, email=email, password=password)
+                t_user = time.perf_counter()
+                print(f"[REGISTER-TIMING] User creation took {(t_user - t0):.3f}s: {username}")
                 
                 # Provision dedicated MySQL database for this user
                 from User.db_manager import ensure_user_database
                 ensure_user_database(created_user)
+                t_prov = time.perf_counter()
+                print(f"[REGISTER-TIMING] Database provisioning took {(t_prov - t_user):.3f}s (total registration: {(t_prov - t0):.3f}s)")
                 
                 print(f"[REGISTER] User and database created successfully: {username}")
                 messages.success(request, 'Registration successful! Please login.')

@@ -71,26 +71,38 @@ class FallbackOrchestrator:
                 logger.warning(f"Could not extract PARI features for {url}: {e}")
                 pari_features = None
 
-        # 1. Webpage / DOM Analysis
-        try:
-            webpage_evidence = self.webpage_analyzer.analyze_webpage(url)
-        except Exception as e:
-            logger.error(f"Webpage analysis exception for Scan {scan_id}: {e}")
-            webpage_evidence = {"status": "ERROR", "error": str(e), "indicators": [], "findings": []}
+        # 1-3. Concurrently execute independent initial evidence collectors (Webpage, Network, Visual)
+        # using a bounded thread pool (3 workers) to overlap network I/O without exceeding Render Free limits.
+        import concurrent.futures
 
-        # 2. Network / DNS / SSL Analysis
-        try:
-            network_evidence = self.network_analyzer.analyze_network(url)
-        except Exception as e:
-            logger.error(f"Network analysis exception for Scan {scan_id}: {e}")
-            network_evidence = {"status": "ERROR", "error": str(e), "network_findings": []}
+        def _run_webpage():
+            try:
+                return self.webpage_analyzer.analyze_webpage(url)
+            except Exception as e:
+                logger.error(f"Webpage analysis exception for Scan {scan_id}: {e}")
+                return {"status": "ERROR", "error": str(e), "indicators": [], "findings": []}
 
-        # 3. Visual / Screenshot Analysis
-        try:
-            visual_evidence = self.visual_analyzer.analyze_visual(url, scan_id=scan_id)
-        except Exception as e:
-            logger.error(f"Visual analysis exception for Scan {scan_id}: {e}")
-            visual_evidence = {"status": "UNAVAILABLE", "error": str(e), "visual_findings": []}
+        def _run_network():
+            try:
+                return self.network_analyzer.analyze_network(url)
+            except Exception as e:
+                logger.error(f"Network analysis exception for Scan {scan_id}: {e}")
+                return {"status": "ERROR", "error": str(e), "network_findings": []}
+
+        def _run_visual():
+            try:
+                return self.visual_analyzer.analyze_visual(url, scan_id=scan_id)
+            except Exception as e:
+                logger.error(f"Visual analysis exception for Scan {scan_id}: {e}")
+                return {"status": "UNAVAILABLE", "error": str(e), "visual_findings": []}
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            fut_webpage = executor.submit(_run_webpage)
+            fut_network = executor.submit(_run_network)
+            fut_visual = executor.submit(_run_visual)
+            webpage_evidence = fut_webpage.result()
+            network_evidence = fut_network.result()
+            visual_evidence = fut_visual.result()
 
         # 4. Threat Intelligence & Trusted Domain Intelligence
         try:

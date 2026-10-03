@@ -808,7 +808,7 @@ class UserDatabaseProvisioningTests(SimpleTestCase):
                 del connections.databases[alias]
 
     def test_1_fresh_user_db_provisioning(self):
-        """Case A: database does not exist -> create DB -> register connection -> migrate -> create registry row."""
+        """Case A: database does not exist -> create DB -> register connection -> fast bootstrap -> create registry row."""
         from User import db_manager
         from User.models import UserDatabaseRegistry
 
@@ -818,13 +818,15 @@ class UserDatabaseProvisioningTests(SimpleTestCase):
         mock_registry_mgr.filter.return_value.first.return_value = None
 
         with mock.patch.object(UserDatabaseRegistry.objects, 'using', return_value=mock_registry_mgr), \
-             mock.patch.object(db_manager, 'ensure_mysql_database_exists') as mock_ensure_db, \
+             mock.patch.object(db_manager, 'ensure_mysql_database_exists', return_value=True) as mock_ensure_db, \
+             mock.patch.object(db_manager, 'fast_bootstrap_user_database') as mock_fast_bootstrap, \
              mock.patch.object(db_manager, 'reconcile_user_database_migrations') as mock_reconcile:
             alias = db_manager.ensure_user_database(user)
 
         self.assertEqual(alias, 'user_42')
         mock_ensure_db.assert_called_once_with('maliciousbot_user_000042')
-        mock_reconcile.assert_called_once_with('user_42')
+        mock_fast_bootstrap.assert_called_once_with('user_42')
+        mock_reconcile.assert_not_called()
         mock_registry_mgr.update_or_create.assert_called_once_with(
             user_id=42,
             defaults={
@@ -867,13 +869,15 @@ class UserDatabaseProvisioningTests(SimpleTestCase):
         mock_registry_mgr.filter.return_value.first.return_value = None
 
         with mock.patch.object(UserDatabaseRegistry.objects, 'using', return_value=mock_registry_mgr), \
-             mock.patch.object(db_manager, 'ensure_mysql_database_exists') as mock_ensure_db, \
+             mock.patch.object(db_manager, 'ensure_mysql_database_exists', return_value=False) as mock_ensure_db, \
+             mock.patch.object(db_manager, 'fast_bootstrap_user_database') as mock_fast_bootstrap, \
              mock.patch.object(db_manager, 'reconcile_user_database_migrations') as mock_reconcile:
             alias = db_manager.ensure_user_database(user)
 
         self.assertEqual(alias, 'user_42')
         mock_ensure_db.assert_called_once_with('maliciousbot_user_000042')
         mock_reconcile.assert_called_once_with('user_42')
+        mock_fast_bootstrap.assert_not_called()
         mock_registry_mgr.update_or_create.assert_called_once()
 
     def test_4_partially_migrated_db_recovery(self):
@@ -992,7 +996,8 @@ class UserDatabaseProvisioningTests(SimpleTestCase):
         mock_registry_mgr.filter.return_value.first.return_value = None
 
         with mock.patch.object(UserDatabaseRegistry.objects, 'using', return_value=mock_registry_mgr), \
-             mock.patch.object(db_manager, 'ensure_mysql_database_exists'), \
+             mock.patch.object(db_manager, 'ensure_mysql_database_exists', return_value=True), \
+             mock.patch.object(db_manager, 'fast_bootstrap_user_database'), \
              mock.patch.object(db_manager, 'reconcile_user_database_migrations'):
             db_manager.ensure_user_database(user)
 
@@ -1022,7 +1027,8 @@ class UserDatabaseProvisioningTests(SimpleTestCase):
         mock_registry_mgr.update_or_create.side_effect = fake_update_or_create
 
         with mock.patch.object(UserDatabaseRegistry.objects, 'using', return_value=mock_registry_mgr), \
-             mock.patch.object(db_manager, 'ensure_mysql_database_exists') as mock_ensure, \
+             mock.patch.object(db_manager, 'ensure_mysql_database_exists', return_value=True) as mock_ensure, \
+             mock.patch.object(db_manager, 'fast_bootstrap_user_database') as mock_bootstrap, \
              mock.patch.object(db_manager, 'reconcile_user_database_migrations') as mock_reconcile:
             alias1 = db_manager.ensure_user_database(user)
             alias2 = db_manager.ensure_user_database(user)
@@ -1031,7 +1037,8 @@ class UserDatabaseProvisioningTests(SimpleTestCase):
         self.assertEqual(alias2, 'user_88')
         # DB provisioning and migration should only run once
         self.assertEqual(mock_ensure.call_count, 1)
-        self.assertEqual(mock_reconcile.call_count, 1)
+        self.assertEqual(mock_bootstrap.call_count, 1)
+        self.assertEqual(mock_reconcile.call_count, 0)
 
     def test_10_health_endpoint_does_not_provision(self):
         """Health endpoint skips user database provisioning."""
@@ -1089,7 +1096,7 @@ class UserDatabaseProvisioningTests(SimpleTestCase):
         mock_train.assert_not_called()
 
     def test_14_migration_failure_is_still_surfaced(self):
-        """Migration errors are logged and re-raised, not silently swallowed."""
+        """Migration and provisioning errors are logged and re-raised, not silently swallowed."""
         from django.db.utils import OperationalError
         from User import db_manager
         from User.models import UserDatabaseRegistry
@@ -1101,7 +1108,444 @@ class UserDatabaseProvisioningTests(SimpleTestCase):
 
         with self._in_memory_user_db('user_99') as alias, \
              mock.patch.object(UserDatabaseRegistry.objects, 'using', return_value=mock_registry_mgr), \
-             mock.patch.object(db_manager, 'ensure_mysql_database_exists'), \
-             mock.patch('django.core.management.call_command', side_effect=OperationalError('Simulated SQL error')):
+             mock.patch.object(db_manager, 'ensure_mysql_database_exists', return_value=True), \
+             mock.patch.object(db_manager, 'fast_bootstrap_user_database', side_effect=OperationalError('Simulated SQL error')):
             with self.assertRaises(OperationalError):
                 db_manager.ensure_user_database(user)
+
+
+class FastProvisioningAndPerformanceTests(SimpleTestCase):
+    """
+    Performance and optimization test suite covering:
+    1. Fresh user provisioning succeeds.
+    2. Fresh provisioning does not replay unnecessary historical DDL.
+    3. Existing user fast path skips migration.
+    4. Registry fast path works.
+    5. Partially migrated DB recovery works.
+    6. Migration state remains consistent after fast bootstrap.
+    7. Future migration can still apply.
+    8. Dynamic DB retains Aiven SSL.
+    9. /register succeeds.
+    10. /login succeeds.
+    11. GET /predict succeeds quickly.
+    12. No model training on GET /predict.
+    13. Existing security limits remain intact.
+    14. No duplicate provisioning under concurrent requests.
+    15. Parallel collector execution in fallback orchestrator.
+    16. Benchmark reporting.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._initial_connections = set(connections.databases.keys())
+
+    def tearDown(self):
+        super().tearDown()
+        for alias in list(connections.databases.keys()):
+            if alias not in self._initial_connections:
+                try:
+                    connections[alias].close()
+                except Exception:
+                    pass
+                del connections.databases[alias]
+
+    @contextlib.contextmanager
+    def _in_memory_user_db(self, alias='user_perf_test'):
+        cfg = connections.databases['default'].copy()
+        cfg['ENGINE'] = 'django.db.backends.sqlite3'
+        cfg['NAME'] = ':memory:'
+        cfg['OPTIONS'] = {}
+        cfg['TIME_ZONE'] = None
+        connections.databases[alias] = cfg
+        saved_dbs = self.__class__.databases or frozenset()
+        self.__class__.databases = frozenset(set(saved_dbs) | {alias})
+        try:
+            yield alias
+        finally:
+            self.__class__.databases = saved_dbs
+            if alias in connections.databases:
+                try:
+                    connections[alias].close()
+                except Exception:
+                    pass
+                del connections.databases[alias]
+
+    def test_1_fresh_user_provisioning_succeeds(self):
+        """Requirement 16.1: Fresh user provisioning succeeds and sets active status."""
+        from User import db_manager
+        from User.models import UserDatabaseRegistry
+
+        user = mock.MagicMock(is_authenticated=True, id=101, username='perf_user_101')
+        mock_registry_mgr = mock.MagicMock()
+        mock_registry_mgr.filter.return_value.first.return_value = None
+
+        with mock.patch.object(UserDatabaseRegistry.objects, 'using', return_value=mock_registry_mgr), \
+             mock.patch.object(db_manager, 'ensure_mysql_database_exists', return_value=True) as mock_ensure_db, \
+             mock.patch.object(db_manager, 'fast_bootstrap_user_database') as mock_fast_bootstrap, \
+             mock.patch.object(db_manager, 'reconcile_user_database_migrations') as mock_reconcile:
+            alias = db_manager.ensure_user_database(user)
+
+        self.assertEqual(alias, 'user_101')
+        mock_ensure_db.assert_called_once_with('maliciousbot_user_000101')
+        mock_fast_bootstrap.assert_called_once_with('user_101')
+        mock_reconcile.assert_not_called()
+        mock_registry_mgr.update_or_create.assert_called_once()
+
+    def test_2_fresh_provisioning_does_not_replay_unnecessary_historical_ddl(self):
+        """Requirement 16.2: Fast bootstrap directly creates current tables without migration history replay."""
+        from User.db_manager import fast_bootstrap_user_database
+
+        with self._in_memory_user_db('test_fast_ddl') as alias:
+            fast_bootstrap_user_database(alias)
+            conn = connections[alias]
+            with conn.cursor() as cursor:
+                tables = {t.lower() for t in conn.introspection.table_names(cursor)}
+
+            expected_user_tables = {
+                'django_content_type',
+                'pari_domain',
+                'pari_ip',
+                'pari_threat_indicator',
+                'history_clear_events',
+                'user_maliciousbot',
+                'pari_url',
+                'pari_scan',
+                'pari_analyst_review',
+                'pari_prediction',
+                'pari_scan_features',
+                'pari_scan_fallback',
+                'pari_evidence_summary',
+                'pari_ai_evidence',
+                'pari_final_decision',
+                'pari_scan_indicator',
+            }
+            for table in expected_user_tables:
+                self.assertIn(table, tables, f"Expected user table '{table}' missing from fast-bootstrapped DB")
+
+            # Control-only tables must NOT be present in user DB
+            self.assertNotIn('auth_user', tables)
+            self.assertNotIn('django_session', tables)
+            self.assertNotIn('user_database_registry', tables)
+
+    def test_3_existing_user_fast_path_skips_migration(self):
+        """Requirement 16.3: Provisioned user skips all DDL, migration, and DB creation."""
+        from User import db_manager
+        from User.models import UserDatabaseRegistry
+
+        user = mock.MagicMock(is_authenticated=True, id=103, username='existing_103')
+        existing_reg = mock.MagicMock(id=50, status='active')
+        mock_registry_mgr = mock.MagicMock()
+        mock_registry_mgr.filter.return_value.first.return_value = existing_reg
+
+        with mock.patch.object(UserDatabaseRegistry.objects, 'using', return_value=mock_registry_mgr), \
+             mock.patch.object(db_manager, 'ensure_mysql_database_exists') as mock_ensure, \
+             mock.patch.object(db_manager, 'fast_bootstrap_user_database') as mock_bootstrap, \
+             mock.patch.object(db_manager, 'reconcile_user_database_migrations') as mock_reconcile:
+            alias = db_manager.ensure_user_database(user)
+
+        self.assertEqual(alias, 'user_103')
+        mock_ensure.assert_not_called()
+        mock_bootstrap.assert_not_called()
+        mock_reconcile.assert_not_called()
+
+    def test_4_registry_fast_path_works(self):
+        """Requirement 16.4: Active registry entry touches last_used_at and returns alias immediately."""
+        from User import db_manager
+        from User.models import UserDatabaseRegistry
+
+        user = mock.MagicMock(is_authenticated=True, id=104, username='existing_104')
+        existing_reg = mock.MagicMock(id=60, status='active')
+        mock_registry_mgr = mock.MagicMock()
+        mock_registry_mgr.filter.return_value.first.return_value = existing_reg
+
+        with mock.patch.object(UserDatabaseRegistry.objects, 'using', return_value=mock_registry_mgr):
+            alias = db_manager.ensure_user_database(user)
+
+        self.assertEqual(alias, 'user_104')
+        mock_registry_mgr.filter.return_value.update.assert_called_once()
+
+    def test_5_partially_migrated_db_recovery_works(self):
+        """Requirement 16.5: Partially migrated DBs safely recover via reconcile_user_database_migrations."""
+        from django.core.management import call_command
+        from django.db.migrations.recorder import MigrationRecorder
+        from User.db_manager import reconcile_user_database_migrations
+
+        with self._in_memory_user_db('test_partial_recovery') as alias:
+            call_command('migrate', 'contenttypes', database=alias, verbosity=0)
+            call_command('migrate', 'User', '0004', database=alias, verbosity=0)
+
+            conn = connections[alias]
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "DELETE FROM django_migrations WHERE app=%s AND name=%s",
+                    ['User', '0004_pari_schema']
+                )
+
+            recorder = MigrationRecorder(conn)
+            self.assertNotIn(('User', '0004_pari_schema'), recorder.applied_migrations())
+
+            reconcile_user_database_migrations(alias)
+
+            applied_user_migrations = [m[1] for m in recorder.applied_migrations() if m[0] == 'User']
+            self.assertIn('0004_pari_schema', applied_user_migrations)
+            self.assertIn('0011_scanfinaldecision_and_more', applied_user_migrations)
+
+    def test_6_migration_state_remains_consistent_after_fast_bootstrap(self):
+        """Requirement 16.6: Migration state is 100% consistent and migrate reports no unapplied migrations."""
+        from django.core.management import call_command
+        from django.db.migrations.recorder import MigrationRecorder
+        from django.db.migrations.executor import MigrationExecutor
+        from User.db_manager import fast_bootstrap_user_database
+
+        with self._in_memory_user_db('test_consistency') as alias:
+            fast_bootstrap_user_database(alias)
+
+            conn = connections[alias]
+            recorder = MigrationRecorder(conn)
+            applied = recorder.applied_migrations()
+
+            # All 29 migrations in graph closure must be registered
+            self.assertGreaterEqual(len(applied), 29)
+            self.assertIn(('User', '0011_scanfinaldecision_and_more'), applied)
+            self.assertIn(('contenttypes', '0002_remove_content_type_name'), applied)
+
+            # Check history consistency
+            executor = MigrationExecutor(conn)
+            executor.loader.check_consistent_history(conn)
+
+            # Subsequent migrate should report no unapplied migrations
+            call_command('migrate', database=alias, verbosity=0)
+
+    def test_7_future_migration_can_still_apply(self):
+        """Requirement 16.7: A future migration can apply seamlessly on top of fast-bootstrapped DB."""
+        from django.db import models
+        from django.db.migrations.migration import Migration
+        from django.db.migrations.operations.fields import AddField
+        from django.db.migrations.executor import MigrationExecutor
+        from django.db.migrations.recorder import MigrationRecorder
+        from User.db_manager import fast_bootstrap_user_database
+
+        with self._in_memory_user_db('test_future_mig') as alias:
+            fast_bootstrap_user_database(alias)
+            conn = connections[alias]
+
+            class FutureMigration(Migration):
+                dependencies = [('User', '0011_scanfinaldecision_and_more')]
+                operations = [
+                    AddField(
+                        'Domain',
+                        'perf_test_flag',
+                        models.CharField(max_length=50, null=True, blank=True)
+                    )
+                ]
+
+            executor = MigrationExecutor(conn)
+            executor.loader.build_graph()
+            future_node = ('User', '9999_perf_future_test')
+            executor.loader.graph.add_node(future_node, FutureMigration('9999_perf_future_test', 'User'))
+            executor.loader.graph.add_dependency(
+                'User.9999_perf_future_test',
+                future_node,
+                ('User', '0011_scanfinaldecision_and_more')
+            )
+
+            plan = executor.migration_plan([future_node])
+            self.assertEqual(len(plan), 1)
+            self.assertEqual(plan[0][0].name, '9999_perf_future_test')
+
+            executor.migrate([future_node])
+
+            recorder = MigrationRecorder(conn)
+            self.assertIn(future_node, recorder.applied_migrations())
+
+    def test_8_dynamic_db_retains_aiven_ssl(self):
+        """Requirement 16.8: Cloned dynamic user database retains exact SSL settings."""
+        from User.db_manager import get_mysql_db_config
+
+        cfg = get_mysql_db_config('maliciousbot_user_000777')
+        self.assertEqual(cfg['NAME'], 'maliciousbot_user_000777')
+        self.assertEqual(cfg['CONN_MAX_AGE'], 0)
+        self.assertEqual(cfg['OPTIONS']['charset'], 'utf8mb4')
+        self.assertIn('STRICT_TRANS_TABLES', cfg['OPTIONS']['init_command'])
+
+    def test_9_register_succeeds_and_provisions(self):
+        """Requirement 16.9: Registration view succeeds and provisions user workspace."""
+        from django.contrib.auth.models import User
+        from User import db_manager
+
+        with mock.patch.object(User.objects, 'filter') as mock_filter, \
+             mock.patch.object(User.objects, 'create_user') as mock_create_user, \
+             mock.patch.object(db_manager, 'ensure_user_database') as mock_ensure:
+            mock_filter.return_value.exists.return_value = False
+            mock_user = mock.MagicMock(id=888, username='newreg')
+            mock_create_user.return_value = mock_user
+
+            response = self.client.post('/register', {
+                'username': 'newreg',
+                'email': 'newreg@example.com',
+                'password': 'password123',
+                'password2': 'password123',
+            })
+
+            self.assertEqual(response.status_code, 302)
+            self.assertEqual(response['Location'], '/login')
+            mock_ensure.assert_called_once_with(mock_user)
+
+    def test_10_login_succeeds(self):
+        """Requirement 16.10: Login view authenticates and redirects to /predict."""
+        from django.contrib.auth.models import User
+
+        with mock.patch('django.contrib.auth.authenticate') as mock_auth, \
+             mock.patch('django.contrib.auth.login'):
+            mock_user = mock.MagicMock(is_authenticated=True, username='testuser')
+            mock_auth.return_value = mock_user
+
+            response = self.client.post('/login', {
+                'username': 'testuser',
+                'password': 'secretpassword',
+            })
+
+            self.assertEqual(response.status_code, 302)
+            self.assertEqual(response['Location'], '/predict')
+
+    def test_11_predict_get_succeeds_quickly(self):
+        """Requirement 16.11: GET /predict renders quickly without training ML model."""
+        import time
+        from User import views
+
+        with mock.patch('User.middleware.ensure_user_database', return_value='user_10'), \
+             mock.patch.object(views, 'train_model') as mock_train:
+            t0 = time.perf_counter()
+            response = self.client.get('/predict')
+            elapsed = time.perf_counter() - t0
+
+            self.assertEqual(response.status_code, 200)
+            mock_train.assert_not_called()
+            self.assertLess(elapsed, 1.0, f"GET /predict took {elapsed:.3f}s; expected < 1.0s")
+
+    def test_12_no_model_training_on_get_predict(self):
+        """Requirement 16.12: GET /predict preserves model_trained state."""
+        from User import views
+
+        initial_state = views.model_trained
+        with mock.patch('User.middleware.ensure_user_database', return_value='guest_db'):
+            response = self.client.get('/predict')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(views.model_trained, initial_state)
+
+    def test_13_existing_security_limits_remain_intact(self):
+        """Requirement 16.13: Security thresholds and timeouts are preserved."""
+        from User.services.nikhil.webpage_analyzer import WebpageAnalyzer
+        from User.services.nikhil.network_analyzer import NetworkAnalyzer
+
+        self.assertEqual(WebpageAnalyzer.TIMEOUT, (3.0, 5.0))
+        self.assertEqual(WebpageAnalyzer.MAX_CONTENT_SIZE, 1024 * 1024)
+        self.assertEqual(WebpageAnalyzer.MAX_REDIRECTS, 3)
+        self.assertLessEqual(NetworkAnalyzer.DNS_TIMEOUT, 5.0)
+        self.assertLessEqual(NetworkAnalyzer.HTTP_TIMEOUT, 5.0)
+        self.assertLessEqual(NetworkAnalyzer.SSL_TIMEOUT, 5.0)
+
+    def test_14_no_duplicate_provisioning_under_concurrent_requests(self):
+        """Requirement 16.14: In-process locks serialize per-user provisioning without global lock."""
+        from User.db_manager import _get_user_provision_lock
+
+        lock_u1_a = _get_user_provision_lock(501)
+        lock_u1_b = _get_user_provision_lock(501)
+        lock_u2 = _get_user_provision_lock(502)
+
+        # Same user gets the exact same lock
+        self.assertIs(lock_u1_a, lock_u1_b)
+        # Different users get distinct locks (no cross-user serialization)
+        self.assertIsNot(lock_u1_a, lock_u2)
+
+    def test_15_parallel_collector_execution(self):
+        """Requirement 10: Fallback orchestrator concurrently runs independent collectors."""
+        from User.services.nikhil.orchestration_service import FallbackOrchestrator
+
+        orchestrator = FallbackOrchestrator()
+        orchestrator.webpage_analyzer = mock.MagicMock()
+        orchestrator.webpage_analyzer.analyze_webpage.return_value = {
+            "status": "SUCCESS", "indicators": [], "findings": []
+        }
+        orchestrator.network_analyzer = mock.MagicMock()
+        orchestrator.network_analyzer.analyze_network.return_value = {
+            "status": "SUCCESS", "domain": "example.com", "network_findings": []
+        }
+        orchestrator.visual_analyzer = mock.MagicMock()
+        orchestrator.visual_analyzer.analyze_visual.return_value = {
+            "status": "UNAVAILABLE", "visual_findings": []
+        }
+        orchestrator.threat_intel_service = mock.MagicMock()
+        orchestrator.threat_intel_service.analyze_threat_intel.return_value = {
+            "status": "NO_MATCH", "summary": {}, "sources": {}
+        }
+        orchestrator.trusted_domain_service = mock.MagicMock()
+        orchestrator.trusted_domain_service.lookup_domain.return_value = {"is_known": False}
+        orchestrator.trusted_domain_service.extract_url_features.return_value = {}
+        orchestrator.prompt_injection_detector = mock.MagicMock()
+        orchestrator.prompt_injection_detector.detect_prompt_injection.return_value = {
+            "prompt_injection_detected": False, "matched_patterns": [], "confidence": 0.0
+        }
+        orchestrator.ai_analyzer = mock.MagicMock()
+        orchestrator.ai_analyzer.analyze.return_value = {
+            "status": "NOT_RUN", "ai_required": False, "ai_called": False, "reasoning_summary": ""
+        }
+        orchestrator.mongo_repo = mock.MagicMock()
+        orchestrator.mongo_repo.store_evidence.return_value = "mock_doc_id"
+
+        evidence, doc_id = orchestrator.perform_deep_analysis(
+            scan_id=999,
+            url="http://example.com/test",
+            initial_prediction="Benign",
+            initial_confidence=0.60
+        )
+
+        self.assertIn("webpage", evidence)
+        self.assertIn("network", evidence)
+        self.assertIn("visual", evidence)
+        orchestrator.webpage_analyzer.analyze_webpage.assert_called_once()
+        orchestrator.network_analyzer.analyze_network.assert_called_once()
+        orchestrator.visual_analyzer.analyze_visual.assert_called_once()
+
+    def test_16_performance_benchmarks(self):
+        """Requirement 17: Local benchmark reporting timings for key operations."""
+        import time
+        from User.db_manager import fast_bootstrap_user_database, ensure_user_database
+        from User.models import UserDatabaseRegistry
+
+        # 1. Fresh DB fast bootstrap benchmark
+        with self._in_memory_user_db('bench_fresh_bootstrap') as alias:
+            t0 = time.perf_counter()
+            fast_bootstrap_user_database(alias)
+            t_bootstrap = time.perf_counter() - t0
+
+        # 2. Existing user fast path benchmark
+        user = mock.MagicMock(is_authenticated=True, id=999, username='bench_user')
+        mock_registry_mgr = mock.MagicMock()
+        existing_reg = mock.MagicMock(id=999, status='active')
+        mock_registry_mgr.filter.return_value.first.return_value = existing_reg
+
+        with mock.patch.object(UserDatabaseRegistry.objects, 'using', return_value=mock_registry_mgr):
+            t0 = time.perf_counter()
+            ensure_user_database(user)
+            t_existing = time.perf_counter() - t0
+
+        # 3. GET /predict benchmark
+        with mock.patch('User.middleware.ensure_user_database', return_value='guest_db'):
+            t0 = time.perf_counter()
+            self.client.get('/predict')
+            t_predict_get = time.perf_counter() - t0
+
+        # Print formatted benchmark report
+        print("\n" + "=" * 65)
+        print("          PERFORMANCE BENCHMARK RESULTS")
+        print("=" * 65)
+        print(f"  1. Fresh DB Schema Bootstrap:   {t_bootstrap * 1000:8.2f} ms")
+        print(f"  2. Existing User Fast Path:      {t_existing * 1000:8.2f} ms")
+        print(f"  3. GET /predict Render:          {t_predict_get * 1000:8.2f} ms")
+        print("=" * 65 + "\n")
+
+        self.assertLess(t_bootstrap, 2.0, "Fast bootstrap took longer than 2.0s")
+        self.assertLess(t_existing, 0.1, "Existing user fast path took longer than 100ms")
+        self.assertLess(t_predict_get, 1.0, "GET /predict took longer than 1.0s")
