@@ -1,5 +1,10 @@
 from User.db_manager import ensure_user_database, set_current_db, reset_current_db
 
+# Diagnostic endpoints must stay cheap: Render polls them continuously, and
+# provisioning a database issues CREATE DATABASE / GRANT against the MySQL
+# server. These paths never read application tables, so they skip provisioning.
+NO_PROVISIONING_PATHS = frozenset({'/health', '/status'})
+
 class UserDatabaseMiddleware:
     """
     Middleware that establishes the active MySQL database context per request.
@@ -12,11 +17,15 @@ class UserDatabaseMiddleware:
     def __call__(self, request):
         token = None
         try:
-            if hasattr(request, 'user') and request.user.is_authenticated:
+            if request.path in NO_PROVISIONING_PATHS:
+                # Route to guest_db without provisioning, so health/status probes
+                # do not run DDL on every poll.
+                db_alias = 'guest_db'
+            elif hasattr(request, 'user') and request.user.is_authenticated:
                 db_alias = ensure_user_database(request.user)
             else:
                 db_alias = ensure_user_database(None)
-            
+
             token = set_current_db(db_alias)
             request.user_db = db_alias
             response = self.get_response(request)

@@ -3,6 +3,7 @@ beautifulsoup4>=4.12.0
 certifi==2026.2.25
 charset-normalizer==3.4.7
 colorama==0.4.6
+cryptography>=42.0.0
 dj-database-url==3.1.2
 Django==5.2.13
 gunicorn==25.3.0
@@ -11,8 +12,8 @@ joblib==1.5.3
 numpy==2.4.4
 packaging==26.0
 pandas==3.0.2
-psycopg2-binary==2.9.11
 pymongo>=4.6.0
+PyMySQL>=1.1.0
 python-dateutil==2.9.0.post0
 requests==2.33.1
 scikit-learn==1.8.0
@@ -26,4 +27,3 @@ tzdata==2026.1
 urllib3==2.6.3
 whitenoise==6.12.0
 xgboost==3.2.0
-

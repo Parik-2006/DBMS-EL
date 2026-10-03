@@ -6,6 +6,8 @@ from django.conf import settings
 from django.db import connections
 from django.utils import timezone
 
+from MaliciousBot.db_config import get_mysql_ssl_options
+
 logger = logging.getLogger(__name__)
 
 # Context variable for thread/async-safe request database routing
@@ -46,12 +48,19 @@ def get_mysql_admin_config():
     }
 
 def get_mysql_db_config(database_name):
-    """Generate Django database dictionary for a specific MySQL database."""
+    """Generate Django database dictionary for a specific MySQL database.
+
+    The 'default' connection is cloned so that every dynamically registered
+    per-user database inherits exactly the same host, port, credentials and
+    Aiven SSL configuration as 'default' and 'guest_db'.
+    """
     base = get_mysql_server_config()
     if 'default' in connections.databases:
         cfg = connections.databases['default'].copy()
         cfg['NAME'] = database_name
         return cfg
+    # Fallback used only when Django connections are unavailable. Built from the
+    # same helpers so SSL is still applied consistently.
     return {
         'ENGINE': 'django.db.backends.mysql',
         'NAME': database_name,
@@ -59,10 +68,10 @@ def get_mysql_db_config(database_name):
         'PASSWORD': base['PASSWORD'],
         'HOST': base['HOST'],
         'PORT': base['PORT'],
-        'OPTIONS': {
+        'OPTIONS': dict({
             'charset': 'utf8mb4',
             'init_command': "SET sql_mode='STRICT_TRANS_TABLES'",
-        },
+        }, **get_mysql_ssl_options(base['HOST'])),
         'ATOMIC_REQUESTS': False,
         'AUTOCOMMIT': True,
         'CONN_MAX_AGE': 0,
@@ -83,28 +92,40 @@ def ensure_mysql_database_exists(database_name):
     Create MySQL database on the server if it does not already exist.
     Uses administrative credentials for database creation and grants application privileges.
     Validates name strictly against alphanumeric/underscore characters.
+
+    SSL: Reads MYSQL_SSL_CA / MYSQL_SSL_MODE from the environment so the
+    provisioning connection to Aiven also uses TLS when configured.
     """
     if not re.match(r'^[a-zA-Z0-9_]+$', database_name):
         raise ValueError(f"Invalid database name: {database_name}")
-    
+
     admin_cfg = get_mysql_admin_config()
+
+    # Reuse the exact same Aiven TLS configuration as the Django connections so
+    # database provisioning cannot silently fall back to an unencrypted socket.
+    ssl_kwargs = get_mysql_ssl_options(admin_cfg['HOST'])
+
+    connect_kwargs = {
+        'host': admin_cfg['HOST'],
+        'port': admin_cfg['PORT'],
+        'user': admin_cfg['USER'],
+    }
+
     try:
         import MySQLdb
         conn = MySQLdb.connect(
-            host=admin_cfg['HOST'],
-            port=admin_cfg['PORT'],
-            user=admin_cfg['USER'],
-            passwd=admin_cfg['PASSWORD']
+            passwd=admin_cfg['PASSWORD'],
+            **connect_kwargs,
+            **ssl_kwargs,
         )
     except ImportError:
         import pymysql
         conn = pymysql.connect(
-            host=admin_cfg['HOST'],
-            port=admin_cfg['PORT'],
-            user=admin_cfg['USER'],
-            password=admin_cfg['PASSWORD']
+            password=admin_cfg['PASSWORD'],
+            **connect_kwargs,
+            **ssl_kwargs,
         )
-    
+
     try:
         cursor = conn.cursor()
         cursor.execute(
@@ -127,6 +148,7 @@ def ensure_mysql_database_exists(database_name):
 def register_database_connection(db_alias, database_name):
     """
     Dynamically register a database connection alias with Django connections handler.
+    Inherits SSL configuration from the 'default' connection.
     """
     if db_alias not in connections.databases:
         connections.databases[db_alias] = get_mysql_db_config(database_name)

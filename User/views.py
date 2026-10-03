@@ -817,61 +817,33 @@ def logout(request):
     return HttpResponseRedirect('/')
 
 def health(request):
-    """Health check endpoint for monitoring"""
+    """Health check endpoint for monitoring.
+
+    Confirms that the Django application is running and that the core
+    (maliciousbot_core) database connection is available. Deliberately cheap:
+    it never trains a model and never triggers fallback/analysis work.
+    Returns 503 when the core database cannot be reached.
+    """
+    from django.db import connection
+
     try:
-        # Check database connectivity
-        from django.db import connection
         with connection.cursor() as cursor:
             cursor.execute("SELECT 1")
-        
-        db_status = "OK"
-        db_message = "Database connection successful"
+            cursor.fetchone()
     except Exception as e:
-        db_status = "ERROR"
         db_message = str(e)
         print(f"Health check - Database error: {db_message}")
+        return JsonResponse({
+            'status': 'error',
+            'message': f'Database error: {db_message}',
+            'database': connection.settings_dict.get('ENGINE', 'unknown'),
+        }, status=503)
 
-    # Check ML availability
-    ml_status = "OK" if ML_AVAILABLE else "UNAVAILABLE"
-    model_status = "TRAINED" if model_trained else "NOT_TRAINED"
-
-    # Check model training capability
-    try:
-        if not model_trained and ML_AVAILABLE:
-            model_check = "Can train on first request"
-        elif model_trained:
-            model_check = "Model ready for predictions"
-        else:
-            model_check = "ML dependencies not available"
-    except Exception as e:
-        model_check = f"Model check error: {str(e)}"
-
-    response_data = {
-        "status": "healthy" if db_status == "OK" else "degraded",
-        "timestamp": str(datetime.now()),
-        "database": {
-            "status": db_status,
-            "message": db_message
-        },
-        "ml": {
-            "available": ML_AVAILABLE,
-            "status": ml_status,
-            "model_trained": model_trained,
-            "model_status": model_status,
-            "model_check": model_check
-        },
-        "endpoints": {
-            "predict": "/predict",
-            "data": "/data",
-            "register": "/register",
-            "login": "/login",
-            "health": "/health",
-            "status": "/status"
-        }
-    }
-
-    print(f"Health check performed: {response_data}")
-    return JsonResponse(response_data)
+    return JsonResponse({
+        'status': 'ok',
+        'message': 'Database connection is working',
+        'database': connection.settings_dict.get('ENGINE', 'unknown'),
+    })
 
 def status(request):
     """Comprehensive status endpoint with detailed diagnostics"""
@@ -980,27 +952,4 @@ def status(request):
             "status": "error",
             "message": error_msg,
             "timestamp": str(datetime.now())
-        }, status=500)
-
-def health(request):
-    """Simple health check endpoint"""
-    from django.http import JsonResponse
-    from django.db import connection
-    
-    try:
-        # Test database connection
-        with connection.cursor() as cursor:
-            cursor.execute("SELECT 1")
-        result = cursor.fetchone()
-        
-        return JsonResponse({
-            'status': 'ok',
-            'message': 'Database connection is working',
-            'database': connection.settings_dict.get('ENGINE', 'unknown')
-        })
-    except Exception as e:
-        return JsonResponse({
-            'status': 'error',
-            'message': f'Database error: {str(e)}',
-            'database': connection.settings_dict.get('ENGINE', 'unknown')
         }, status=500)

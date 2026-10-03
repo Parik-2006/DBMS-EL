@@ -1,23 +1,81 @@
+# Render Blueprint (optional).
+#
+# The production service is configured in the Render dashboard. This file keeps
+# the declared settings in sync with docs/RENDER_AIVEN_DEPLOYMENT.md.
+#
+# Secrets (Aiven password, MongoDB URI, Gemini/OpenRouter keys, SECRET_KEY)
+# are intentionally NOT declared here. Add them in the Render dashboard under
+# Environment.
 services:
   - type: web
     name: maliciousbot
-    env: python
+    runtime: python
     plan: free
-    autoDeploy: true
-    buildCommand: "pip install -r requirements.txt && python manage.py collectstatic --noinput && python manage.py migrate"
+    autoDeploy: false
+    # Root Directory is intentionally blank so manage.py is found at the repo root.
+    rootDir: ""
+    buildCommand: "./build.sh"
     startCommand: "gunicorn MaliciousBot.wsgi:application"
+    healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION
-        value: 3.11.9
+        value: "3.12.4"
       - key: DEBUG
         value: "False"
+      # RENDER_EXTERNAL_HOSTNAME is folded into ALLOWED_HOSTS / CSRF_TRUSTED_ORIGINS
+      # automatically, so these are optional overrides.
       - key: ALLOWED_HOSTS
-        value: diploma-project-rwht.onrender.com
+        sync: false
       - key: CSRF_TRUSTED_ORIGINS
-        value: https://diploma-project-rwht.onrender.com
+        sync: false
       - key: SECRET_KEY
         generateValue: true
-    databases:
-      - name: malicious-db
-        databaseName: malicious_db
-        user: admin
+      # --- Aiven MySQL ---
+      - key: MYSQL_HOST
+        sync: false
+      - key: MYSQL_PORT
+        sync: false
+      - key: MYSQL_USER
+        sync: false
+      - key: MYSQL_PASSWORD
+        sync: false
+      - key: MYSQL_CORE_DATABASE
+        value: maliciousbot_core
+      - key: MYSQL_ADMIN_USER
+        sync: false
+      - key: MYSQL_ADMIN_PASSWORD
+        sync: false
+      # --- Aiven SSL ---
+      # Mount the Aiven project CA as a Render Secret File and point at it,
+      # or paste the PEM inline.
+      - key: MYSQL_SSL_MODE
+        value: VERIFY_CA
+      - key: MYSQL_SSL_CA
+        sync: false
+      # --- MongoDB Atlas ---
+      - key: MONGODB_URI
+        sync: false
+      - key: MONGODB_DATABASE
+        value: nikhil_db
+      - key: MONGODB_COLLECTION
+        value: deep_analysis_cases
+      # --- Free-only AI ---
+      - key: FREE_ONLY
+        value: "true"
+      - key: ALLOW_PAID_PROVIDERS
+        value: "false"
+      - key: AI_MAX_PROVIDER_ATTEMPTS
+        value: "2"
+      - key: GEMINI_ENABLED
+        value: "true"
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      # --- Threat intelligence ---
+      - key: THREATFOX_API_KEY
+        sync: false
+      - key: URLHAUS_API_KEY
+        sync: false
+      - key: ABUSEIPDB_API_KEY
+        sync: false

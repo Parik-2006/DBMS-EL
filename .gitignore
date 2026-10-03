@@ -86,6 +86,17 @@ Desktop.ini
 .env.*
 *.env
 
+# TLS / certificate material
+# The Aiven CA is supplied on Render as a Secret File and referenced through
+# MYSQL_SSL_CA, so no certificate should ever enter the repository.
+*.pem
+*.crt
+*.cer
+*.key
+*.p12
+*.pfx
+!static/**/*.pem
+
 # Temporary/debug scripts and local tests
 query_db_canonical.py
 tests_local/

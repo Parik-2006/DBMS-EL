@@ -13,6 +13,8 @@ https://docs.djangoproject.com/en/3.0/ref/settings/
 import os
 import dj_database_url
 
+from MaliciousBot.db_config import get_mysql_ssl_options, resolve_mysql_ssl_mode
+
 # Build paths inside the project like this: os.path.join(BASE_DIR, ...)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -34,17 +36,80 @@ def load_env_file(env_path):
 load_env_file(os.path.join(BASE_DIR, ".env"))
 
 
-# Quick-start development settings - unsuitable for production
-# See https://docs.djangoproject.com/en/3.0/howto/deployment/checklist/
-
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.environ.get('SECRET_KEY', 'change-me-in-env')
 
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = os.environ.get('DEBUG', 'True').lower() in ('true', '1', 'yes', 'on')
+_TRUTHY = ('true', '1', 'yes', 'on')
 
-ALLOWED_HOSTS = [host.strip() for host in os.environ.get('ALLOWED_HOSTS', '127.0.0.1,localhost,testserver').split(',') if host.strip()]
-CSRF_TRUSTED_ORIGINS = [origin.strip() for origin in os.environ.get('CSRF_TRUSTED_ORIGINS', '').split(',') if origin.strip()]
+
+def is_production_runtime():
+    """True when running on a production-style platform such as Render."""
+    return bool(os.environ.get('RENDER') or os.environ.get('PRODUCTION'))
+
+
+def resolve_debug():
+    """
+    Resolve DEBUG.
+
+    DEBUG defaults to True only for ordinary local development. On Render (or any
+    production runtime) it defaults to False, so a missing DEBUG variable can
+    never expose tracebacks publicly.
+    """
+    default = 'False' if is_production_runtime() else 'True'
+    return os.environ.get('DEBUG', default).lower() in _TRUTHY
+
+
+def build_allowed_hosts():
+    """
+    Build ALLOWED_HOSTS from the environment.
+
+    Supports an explicit comma-separated ALLOWED_HOSTS variable and also folds in
+    Render's RENDER_EXTERNAL_HOSTNAME, so the deployed hostname is allowed
+    without hardcoding it and without duplicating entries. Localhost defaults are
+    only applied when nothing at all is configured.
+    """
+    configured = [
+        host.strip()
+        for host in os.environ.get('ALLOWED_HOSTS', '').split(',')
+        if host.strip()
+    ]
+
+    render_host = os.environ.get('RENDER_EXTERNAL_HOSTNAME', '').strip()
+    if render_host:
+        configured.append(render_host)
+
+    if not configured:
+        configured = ['127.0.0.1', 'localhost', 'testserver']
+
+    # Preserve order while removing duplicates.
+    return list(dict.fromkeys(configured))
+
+
+def build_csrf_trusted_origins():
+    """
+    Build CSRF_TRUSTED_ORIGINS from the environment.
+
+    Accepts an explicit comma-separated list and additionally derives the HTTPS
+    origin from RENDER_EXTERNAL_HOSTNAME, again without duplicating entries.
+    """
+    origins = [
+        origin.strip()
+        for origin in os.environ.get('CSRF_TRUSTED_ORIGINS', '').split(',')
+        if origin.strip()
+    ]
+
+    render_host = os.environ.get('RENDER_EXTERNAL_HOSTNAME', '').strip()
+    if render_host:
+        origins.append(f"https://{render_host}")
+
+    return list(dict.fromkeys(origins))
+
+
+# SECURITY WARNING: don't run with debug turned on in production!
+DEBUG = resolve_debug()
+
+ALLOWED_HOSTS = build_allowed_hosts()
+CSRF_TRUSTED_ORIGINS = build_csrf_trusted_origins()
 
 
 # Application definition
@@ -99,33 +164,47 @@ MYSQL_HOST = os.environ.get('MYSQL_HOST', 'localhost')
 MYSQL_PORT = int(os.environ.get('MYSQL_PORT', 3306))
 MYSQL_USER = os.environ.get('MYSQL_USER', 'maliciousbot_app')
 MYSQL_PASSWORD = os.environ.get('MYSQL_PASSWORD', '')
+MYSQL_CORE_DATABASE = os.environ.get('MYSQL_CORE_DATABASE', 'maliciousbot_core')
+MYSQL_GUEST_DATABASE = os.environ.get('MYSQL_GUEST_DATABASE', 'maliciousbot_guest')
+MYSQL_SSL_MODE_EFFECTIVE = resolve_mysql_ssl_mode(MYSQL_HOST)
+
+
+def get_mysql_base_options():
+    """
+    OPTIONS dict shared by every MySQL connection in this project.
+
+    Combines the strict charset/SQL-mode settings with the Aiven TLS options
+    produced by :mod:`MaliciousBot.db_config`, so ``default``, ``guest_db`` and
+    every dynamically registered per-user database stay identical.
+    """
+    options = {
+        'charset': 'utf8mb4',
+        'init_command': "SET sql_mode='STRICT_TRANS_TABLES'",
+    }
+    options.update(get_mysql_ssl_options(MYSQL_HOST))
+    return options
+
 
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.mysql',
-        'NAME': os.environ.get('MYSQL_CORE_DATABASE', 'maliciousbot_core'),
+        'NAME': MYSQL_CORE_DATABASE,
         'USER': MYSQL_USER,
         'PASSWORD': MYSQL_PASSWORD,
         'HOST': MYSQL_HOST,
         'PORT': MYSQL_PORT,
-        'OPTIONS': {
-            'charset': 'utf8mb4',
-            'init_command': "SET sql_mode='STRICT_TRANS_TABLES'",
-        },
+        'OPTIONS': get_mysql_base_options(),
         'CONN_MAX_AGE': 0,
         'ATOMIC_REQUESTS': False,
     },
     'guest_db': {
         'ENGINE': 'django.db.backends.mysql',
-        'NAME': 'maliciousbot_guest',
+        'NAME': MYSQL_GUEST_DATABASE,
         'USER': MYSQL_USER,
         'PASSWORD': MYSQL_PASSWORD,
         'HOST': MYSQL_HOST,
         'PORT': MYSQL_PORT,
-        'OPTIONS': {
-            'charset': 'utf8mb4',
-            'init_command': "SET sql_mode='STRICT_TRANS_TABLES'",
-        },
+        'OPTIONS': get_mysql_base_options(),
         'CONN_MAX_AGE': 0,
         'ATOMIC_REQUESTS': False,
     }
