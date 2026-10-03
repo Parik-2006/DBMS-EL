@@ -752,3 +752,356 @@ class GracefulDegradationTests(SimpleTestCase):
             os.environ, {'OPENROUTER_MODEL': 'some/paid-model'}, clear=False
         ):
             self.assertFalse(OpenRouterProvider()._validate_free_model())
+
+
+class UserDatabaseProvisioningTests(SimpleTestCase):
+    """
+    Tests for per-user database provisioning, recovery, idempotency, and concurrency:
+    1. Fresh user DB provisioning.
+    2. Existing fully migrated user DB.
+    3. Existing DB + missing registry row.
+    4. Partially migrated DB.
+    5. Existing initial table + missing migration record.
+    6. fake_initial recovery path.
+    7. Later migrations still run.
+    8. No duplicate registry rows.
+    9. Repeated ensure_user_database() is idempotent.
+    10. Health endpoint does not provision.
+    11. Status endpoint does not provision.
+    12. Dynamic DB retains Aiven SSL configuration.
+    13. /predict GET succeeds after provisioning.
+    14. Migration failure is still surfaced.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._initial_connections = set(connections.databases.keys())
+
+    def tearDown(self):
+        super().tearDown()
+        for alias in list(connections.databases.keys()):
+            if alias not in self._initial_connections:
+                try:
+                    connections[alias].close()
+                except Exception:
+                    pass
+                del connections.databases[alias]
+
+    @contextlib.contextmanager
+    def _in_memory_user_db(self, alias='user_test_prov'):
+        cfg = connections.databases['default'].copy()
+        cfg['ENGINE'] = 'django.db.backends.sqlite3'
+        cfg['NAME'] = ':memory:'
+        cfg['OPTIONS'] = {}
+        connections.databases[alias] = cfg
+        saved_dbs = self.__class__.databases or frozenset()
+        self.__class__.databases = frozenset(set(saved_dbs) | {alias})
+        try:
+            yield alias
+        finally:
+            self.__class__.databases = saved_dbs
+            if alias in connections.databases:
+                try:
+                    connections[alias].close()
+                except Exception:
+                    pass
+                del connections.databases[alias]
+
+    def test_1_fresh_user_db_provisioning(self):
+        """Case A: database does not exist -> create DB -> register connection -> migrate -> create registry row."""
+        from User import db_manager
+        from User.models import UserDatabaseRegistry
+
+        user = mock.MagicMock(is_authenticated=True, id=42, username='fresh_user')
+
+        mock_registry_mgr = mock.MagicMock()
+        mock_registry_mgr.filter.return_value.first.return_value = None
+
+        with mock.patch.object(UserDatabaseRegistry.objects, 'using', return_value=mock_registry_mgr), \
+             mock.patch.object(db_manager, 'ensure_mysql_database_exists') as mock_ensure_db, \
+             mock.patch.object(db_manager, 'reconcile_user_database_migrations') as mock_reconcile:
+            alias = db_manager.ensure_user_database(user)
+
+        self.assertEqual(alias, 'user_42')
+        mock_ensure_db.assert_called_once_with('maliciousbot_user_000042')
+        mock_reconcile.assert_called_once_with('user_42')
+        mock_registry_mgr.update_or_create.assert_called_once_with(
+            user_id=42,
+            defaults={
+                'username': 'fresh_user',
+                'database_name': 'maliciousbot_user_000042',
+                'status': 'active',
+                'last_used_at': mock.ANY,
+            }
+        )
+
+    def test_2_existing_fully_migrated_user_db(self):
+        """Case B: database exists and registry exists -> register connection -> do NOT rerun provisioning -> update last_used_at."""
+        from User import db_manager
+        from User.models import UserDatabaseRegistry
+
+        user = mock.MagicMock(is_authenticated=True, id=42, username='existing_user')
+        existing_reg = mock.MagicMock(id=99, status='active')
+
+        mock_registry_mgr = mock.MagicMock()
+        mock_registry_mgr.filter.return_value.first.return_value = existing_reg
+
+        with mock.patch.object(UserDatabaseRegistry.objects, 'using', return_value=mock_registry_mgr), \
+             mock.patch.object(db_manager, 'ensure_mysql_database_exists') as mock_ensure_db, \
+             mock.patch.object(db_manager, 'reconcile_user_database_migrations') as mock_reconcile:
+            alias = db_manager.ensure_user_database(user)
+
+        self.assertEqual(alias, 'user_42')
+        mock_ensure_db.assert_not_called()
+        mock_reconcile.assert_not_called()
+        mock_registry_mgr.filter.return_value.update.assert_called_once()
+
+    def test_3_existing_db_missing_registry_row(self):
+        """Case C: database exists but registry row is missing -> inspect/reconcile -> complete migrations -> create registry row."""
+        from User import db_manager
+        from User.models import UserDatabaseRegistry
+
+        user = mock.MagicMock(is_authenticated=True, id=42, username='reconcile_user')
+
+        mock_registry_mgr = mock.MagicMock()
+        mock_registry_mgr.filter.return_value.first.return_value = None
+
+        with mock.patch.object(UserDatabaseRegistry.objects, 'using', return_value=mock_registry_mgr), \
+             mock.patch.object(db_manager, 'ensure_mysql_database_exists') as mock_ensure_db, \
+             mock.patch.object(db_manager, 'reconcile_user_database_migrations') as mock_reconcile:
+            alias = db_manager.ensure_user_database(user)
+
+        self.assertEqual(alias, 'user_42')
+        mock_ensure_db.assert_called_once_with('maliciousbot_user_000042')
+        mock_reconcile.assert_called_once_with('user_42')
+        mock_registry_mgr.update_or_create.assert_called_once()
+
+    def test_4_partially_migrated_db_recovery(self):
+        """Case D: database exists and migration partially completed -> recover safely -> finish remaining migrations."""
+        from django.core.management import call_command
+        from django.db.migrations.recorder import MigrationRecorder
+        from User.db_manager import reconcile_user_database_migrations
+
+        with self._in_memory_user_db('test_partially_migrated') as alias:
+            call_command('migrate', 'contenttypes', database=alias, verbosity=0)
+            call_command('migrate', 'User', '0004', database=alias, verbosity=0)
+
+            # Simulate interrupted 0004: remove from django_migrations so tables exist but record is missing
+            conn = connections[alias]
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "DELETE FROM django_migrations WHERE app=%s AND name=%s",
+                    ['User', '0004_pari_schema']
+                )
+
+            recorder = MigrationRecorder(conn)
+            self.assertNotIn(('User', '0004_pari_schema'), recorder.applied_migrations())
+
+            # Reconcile: must succeed without crashing on table pari_domain already exists
+            reconcile_user_database_migrations(alias)
+
+            applied_names = [m[1] for m in recorder.applied_migrations() if m[0] == 'User']
+            self.assertIn('0004_pari_schema', applied_names)
+            self.assertIn('0011_scanfinaldecision_and_more', applied_names)
+
+            # Ensure application tables exist
+            with conn.cursor() as cursor:
+                tables = set(conn.introspection.table_names(cursor))
+            self.assertIn('pari_domain', tables)
+            self.assertIn('pari_scan', tables)
+            self.assertIn('pari_analyst_review', tables)
+            self.assertIn('pari_final_decision', tables)
+
+    def test_5_existing_initial_table_missing_migration_record(self):
+        """Existing initial table with missing migration record triggers fake_initial."""
+        from django.core.management import call_command
+        from User.db_manager import reconcile_user_database_migrations
+
+        with self._in_memory_user_db('test_initial_missing') as alias:
+            call_command('migrate', 'contenttypes', database=alias, verbosity=0)
+            call_command('migrate', 'User', '0004', database=alias, verbosity=0)
+
+            conn = connections[alias]
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "DELETE FROM django_migrations WHERE app=%s AND name=%s",
+                    ['User', '0004_pari_schema']
+                )
+
+            with mock.patch('django.core.management.call_command', wraps=call_command) as mock_migrate:
+                reconcile_user_database_migrations(alias)
+
+            # Verify migrate was called with fake_initial=True
+            called_fake_initial = any(
+                kwargs.get('fake_initial') is True
+                for _, _, kwargs in mock_migrate.mock_calls
+                if kwargs.get('database') == alias
+            )
+            self.assertTrue(called_fake_initial)
+
+    def test_6_fake_initial_recovery_path(self):
+        """fake_initial=True is passed only when justified, not on completely empty DB."""
+        from django.core.management import call_command
+        from User.db_manager import reconcile_user_database_migrations
+
+        with self._in_memory_user_db('test_empty_db') as alias:
+            with mock.patch('django.core.management.call_command', wraps=call_command) as mock_migrate:
+                reconcile_user_database_migrations(alias)
+
+            called_fake_initial = any(
+                kwargs.get('fake_initial') is True
+                for _, _, kwargs in mock_migrate.mock_calls
+                if kwargs.get('database') == alias
+            )
+            # Empty database has no initial tables, so fake_initial must be False
+            self.assertFalse(called_fake_initial)
+
+    def test_7_later_migrations_still_run(self):
+        """Later migrations (0005 to 0011) run genuinely after initial tables are reconciled."""
+        from django.core.management import call_command
+        from django.db.migrations.recorder import MigrationRecorder
+        from User.db_manager import reconcile_user_database_migrations
+
+        with self._in_memory_user_db('test_later_migrations') as alias:
+            call_command('migrate', 'contenttypes', database=alias, verbosity=0)
+            call_command('migrate', 'User', '0004', database=alias, verbosity=0)
+
+            conn = connections[alias]
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "DELETE FROM django_migrations WHERE app=%s AND name=%s",
+                    ['User', '0004_pari_schema']
+                )
+
+            reconcile_user_database_migrations(alias)
+
+            recorder = MigrationRecorder(conn)
+            applied = [m[1] for m in recorder.applied_migrations() if m[0] == 'User']
+            for expected in ('0005_analystreview_and_more', '0007_pari_scan_features',
+                             '0008_phase3_separate_initial_fallback', '0011_scanfinaldecision_and_more'):
+                self.assertIn(expected, applied)
+
+    def test_8_no_duplicate_registry_rows(self):
+        """Registry consistency ensures update_or_create prevents duplicate rows."""
+        from User import db_manager
+        from User.models import UserDatabaseRegistry
+
+        user = mock.MagicMock(is_authenticated=True, id=77, username='no_dup_user')
+
+        mock_registry_mgr = mock.MagicMock()
+        mock_registry_mgr.filter.return_value.first.return_value = None
+
+        with mock.patch.object(UserDatabaseRegistry.objects, 'using', return_value=mock_registry_mgr), \
+             mock.patch.object(db_manager, 'ensure_mysql_database_exists'), \
+             mock.patch.object(db_manager, 'reconcile_user_database_migrations'):
+            db_manager.ensure_user_database(user)
+
+        self.assertEqual(mock_registry_mgr.update_or_create.call_count, 1)
+        self.assertEqual(mock_registry_mgr.create.call_count, 0)
+
+    def test_9_repeated_ensure_user_database_is_idempotent(self):
+        """Repeated ensure_user_database calls return same alias and do not re-provision."""
+        from User import db_manager
+        from User.models import UserDatabaseRegistry
+
+        user = mock.MagicMock(is_authenticated=True, id=88, username='idempotent_user')
+
+        mock_registry_mgr = mock.MagicMock()
+        created_entry = []
+
+        def fake_first():
+            return created_entry[0] if created_entry else None
+
+        mock_registry_mgr.filter.return_value.first.side_effect = fake_first
+
+        def fake_update_or_create(**kwargs):
+            entry = mock.MagicMock(id=88, status='active')
+            created_entry.append(entry)
+            return entry, True
+
+        mock_registry_mgr.update_or_create.side_effect = fake_update_or_create
+
+        with mock.patch.object(UserDatabaseRegistry.objects, 'using', return_value=mock_registry_mgr), \
+             mock.patch.object(db_manager, 'ensure_mysql_database_exists') as mock_ensure, \
+             mock.patch.object(db_manager, 'reconcile_user_database_migrations') as mock_reconcile:
+            alias1 = db_manager.ensure_user_database(user)
+            alias2 = db_manager.ensure_user_database(user)
+
+        self.assertEqual(alias1, 'user_88')
+        self.assertEqual(alias2, 'user_88')
+        # DB provisioning and migration should only run once
+        self.assertEqual(mock_ensure.call_count, 1)
+        self.assertEqual(mock_reconcile.call_count, 1)
+
+    def test_10_health_endpoint_does_not_provision(self):
+        """Health endpoint skips user database provisioning."""
+        with mock.patch('User.middleware.ensure_user_database') as mock_ensure, \
+             stubbed_connection_cursor():
+            response = self.client.get('/health')
+        self.assertEqual(response.status_code, 200)
+        mock_ensure.assert_not_called()
+
+    def test_11_status_endpoint_does_not_provision(self):
+        """Status endpoint skips user database provisioning."""
+        with mock.patch('User.middleware.ensure_user_database') as mock_ensure, \
+             stubbed_connection_cursor():
+            response = self.client.get('/status')
+        self.assertEqual(response.status_code, 200)
+        mock_ensure.assert_not_called()
+
+    def test_12_dynamic_db_retains_aiven_ssl_configuration(self):
+        """Dynamic user database inherits identical host, port, credentials, and SSL."""
+        from User.db_manager import get_mysql_db_config
+
+        default = settings.DATABASES['default']
+        cfg = get_mysql_db_config('maliciousbot_user_000001')
+
+        self.assertEqual(cfg['NAME'], 'maliciousbot_user_000001')
+        self.assertEqual(cfg['CONN_MAX_AGE'], 0)
+        self.assertEqual(cfg['OPTIONS']['charset'], 'utf8mb4')
+        self.assertEqual(cfg['OPTIONS']['init_command'], "SET sql_mode='STRICT_TRANS_TABLES'")
+        self.assertEqual(
+            default['OPTIONS'].get('ssl') is not None,
+            cfg['OPTIONS'].get('ssl') is not None
+        )
+
+    def test_13_predict_get_succeeds_after_provisioning(self):
+        """GET /predict succeeds after provisioning without training ML models."""
+        from django.test import RequestFactory
+        from django.contrib.sessions.middleware import SessionMiddleware
+        from django.contrib.messages.middleware import MessageMiddleware
+        from User import views
+        from User.middleware import UserDatabaseMiddleware
+
+        factory = RequestFactory()
+        request = factory.get('/predict')
+        request.user = mock.MagicMock(is_authenticated=True, id=5, username='predict_user')
+        SessionMiddleware(lambda r: None).process_request(request)
+        MessageMiddleware(lambda r: None).process_request(request)
+
+        with mock.patch('User.middleware.ensure_user_database', return_value='user_5') as mock_ensure, \
+             mock.patch.object(views, 'train_model') as mock_train:
+            middleware = UserDatabaseMiddleware(lambda req: views.predict(req))
+            response = middleware(request)
+
+        self.assertEqual(response.status_code, 200)
+        mock_ensure.assert_called_once_with(request.user)
+        mock_train.assert_not_called()
+
+    def test_14_migration_failure_is_still_surfaced(self):
+        """Migration errors are logged and re-raised, not silently swallowed."""
+        from django.db.utils import OperationalError
+        from User import db_manager
+        from User.models import UserDatabaseRegistry
+
+        user = mock.MagicMock(is_authenticated=True, id=99, username='failing_user')
+
+        mock_registry_mgr = mock.MagicMock()
+        mock_registry_mgr.filter.return_value.first.return_value = None
+
+        with self._in_memory_user_db('user_99') as alias, \
+             mock.patch.object(UserDatabaseRegistry.objects, 'using', return_value=mock_registry_mgr), \
+             mock.patch.object(db_manager, 'ensure_mysql_database_exists'), \
+             mock.patch('django.core.management.call_command', side_effect=OperationalError('Simulated SQL error')):
+            with self.assertRaises(OperationalError):
+                db_manager.ensure_user_database(user)

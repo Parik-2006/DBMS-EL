@@ -1,6 +1,7 @@
 import os
 import re
 import logging
+import threading
 import contextvars
 from django.conf import settings
 from django.db import connections
@@ -12,6 +13,17 @@ logger = logging.getLogger(__name__)
 
 # Context variable for thread/async-safe request database routing
 _current_db_var = contextvars.ContextVar('current_db', default=None)
+
+# Concurrency control for per-user provisioning
+_provision_mutex = threading.Lock()
+_user_locks = {}
+
+def _get_user_provision_lock(user_id):
+    """Retrieve or create an in-process lock per user to serialize provisioning."""
+    with _provision_mutex:
+        if user_id not in _user_locks:
+            _user_locks[user_id] = threading.Lock()
+        return _user_locks[user_id]
 
 def set_current_db(db_alias):
     """Set the database alias for the current request context."""
@@ -58,6 +70,7 @@ def get_mysql_db_config(database_name):
     if 'default' in connections.databases:
         cfg = connections.databases['default'].copy()
         cfg['NAME'] = database_name
+        cfg['CONN_MAX_AGE'] = 0
         return cfg
     # Fallback used only when Django connections are unavailable. Built from the
     # same helpers so SSL is still applied consistently.
@@ -153,16 +166,104 @@ def register_database_connection(db_alias, database_name):
     if db_alias not in connections.databases:
         connections.databases[db_alias] = get_mysql_db_config(database_name)
 
+def reconcile_user_database_migrations(db_alias):
+    """
+    Safely reconcile migration state for a user database.
+    - Inspects existing tables in the database.
+    - If initial tables exist (pari_domain, user_maliciousbot) and initial migrations
+      are not recorded in django_migrations, marks fake_initial=True.
+    - If 0004_pari_schema was interrupted midway, safely creates any missing tables/indexes
+      for that initial schema so fake_initial can succeed.
+    - Runs call_command('migrate', database=db_alias, fake_initial=should_fake_initial).
+    - Unapplied later migrations (0005 to 0011) run genuinely and create their tables.
+    - Migration errors are logged and re-raised.
+    """
+    from django.core.management import call_command
+    from django.db.migrations.recorder import MigrationRecorder
+    from django.db.migrations.loader import MigrationLoader
+    from django.db.migrations.operations.models import CreateModel, AddIndex
+
+    connection = connections[db_alias]
+
+    with connection.cursor() as cursor:
+        existing_tables = {t.lower() for t in connection.introspection.table_names(cursor)}
+
+    recorder = MigrationRecorder(connection)
+    try:
+        applied_migrations = recorder.applied_migrations()
+    except Exception:
+        applied_migrations = set()
+
+    # Initial tables defined in 0001_initial and 0004_pari_schema
+    initial_pari_tables = {
+        'pari_domain', 'pari_ip', 'pari_threat_indicator',
+        'pari_url', 'pari_scan', 'pari_scan_indicator', 'pari_prediction',
+    }
+    has_pari_tables = any(t in existing_tables for t in initial_pari_tables)
+    pari_0004_applied = ('User', '0004_pari_schema') in applied_migrations
+    initial_0001_applied = ('User', '0001_initial') in applied_migrations
+    has_0001_table = 'user_maliciousbot' in existing_tables
+
+    # Case D / Interrupted 0004: If 0004_pari_schema is NOT recorded as applied,
+    # but some of its tables already exist in the database (e.g. pari_domain),
+    # reconcile any missing tables from 0004_pari_schema so that fake_initial
+    # will detect that all created models exist and mark 0004 applied without error.
+    if has_pari_tables and not pari_0004_applied:
+        try:
+            loader = MigrationLoader(connection)
+            migration_0004 = loader.get_migration('User', '0004_pari_schema')
+            state = loader.project_state(('User', '0003_alter_maliciousbot_options_maliciousbot_confidence_and_more'))
+            with connection.schema_editor() as schema_editor:
+                for op in migration_0004.operations:
+                    new_state = state.clone()
+                    op.state_forwards('User', new_state)
+                    if isinstance(op, CreateModel):
+                        model = new_state.apps.get_model('User', op.name)
+                        table_name = model._meta.db_table.lower()
+                        if table_name not in existing_tables:
+                            logger.info(f"[PROVISION] reconciling missing initial table: {table_name}")
+                            op.database_forwards('User', schema_editor, state, new_state)
+                            existing_tables.add(table_name)
+                    elif isinstance(op, AddIndex):
+                        try:
+                            op.database_forwards('User', schema_editor, state, new_state)
+                        except Exception:
+                            pass
+                    state = new_state
+        except Exception as e:
+            logger.warning(f"[PROVISION] partial initial table reconciliation notice: {e}")
+
+    # Determine whether fake_initial is justified:
+    # ONLY when existing initial tables are found and their initial migration is not yet recorded as applied.
+    should_fake_initial = bool(
+        (has_pari_tables and not pari_0004_applied) or
+        (has_0001_table and not initial_0001_applied) or
+        ('django_content_type' in existing_tables and ('contenttypes', '0001_initial') not in applied_migrations)
+    )
+
+    logger.info(f"[PROVISION] migration reconciliation started: {db_alias}")
+    try:
+        call_command(
+            'migrate',
+            database=db_alias,
+            fake_initial=should_fake_initial,
+            interactive=False,
+            verbosity=0,
+        )
+    except Exception as e:
+        logger.error(f"[PROVISION] migration failed for user database {db_alias}: {e}")
+        raise
+    logger.info(f"[PROVISION] migration completed: {db_alias}")
+
 def ensure_user_database(user):
     """
     Resolve and prepare the isolated MySQL database for a user.
     - If user is unauthenticated or None, routes to 'guest_db' (maliciousbot_guest).
     - If user is authenticated, resolves maliciousbot_user_XXXXXX,
-      ensures database exists on MySQL, registers connection, applies user migrations,
+      ensures database exists on MySQL, registers connection, applies/reconciles user migrations,
       and tracks in user_database_registry.
     Returns the database alias string to be used for routing.
     """
-    from django.core.management import call_command
     from User.models import UserDatabaseRegistry
 
     if user is None or not getattr(user, 'is_authenticated', False):
@@ -176,33 +277,51 @@ def ensure_user_database(user):
     db_name = get_user_db_name(user_id)
     db_alias = f"user_{user_id}"
 
-    # 1. Ensure MySQL database exists on server
-    ensure_mysql_database_exists(db_name)
-
-    # 2. Register dynamic Django connection
-    register_database_connection(db_alias, db_name)
-
-    # 3. Check or create registry entry in control database (default)
-    registry = UserDatabaseRegistry.objects.using('default').filter(user_id=user_id).first()
-    if registry is None:
-        # First-time provisioning: apply user schema migrations to this database
-        try:
-            call_command('migrate', database=db_alias, interactive=False, verbosity=0)
-        except Exception as e:
-            logger.error(f"Migration failed for user database {db_name}: {e}")
-            raise
-
-        UserDatabaseRegistry.objects.using('default').create(
-            user_id=user_id,
-            username=user.username,
-            database_name=db_name,
-            status='active',
-            last_used_at=timezone.now()
-        )
-    else:
-        # Update last used timestamp
+    # Fast path (Case B): If registry already exists and is active, avoid lock and provisioning
+    registry = UserDatabaseRegistry.objects.using('default').filter(user_id=user_id, status='active').first()
+    if registry is not None:
+        register_database_connection(db_alias, db_name)
         UserDatabaseRegistry.objects.using('default').filter(id=registry.id).update(
             last_used_at=timezone.now()
         )
+        return db_alias
+
+    # Concurrency control: per-user lock prevents simultaneous provisioning requests
+    user_lock = _get_user_provision_lock(user_id)
+    with user_lock:
+        # Re-check registry under lock in case another request completed provisioning
+        registry = UserDatabaseRegistry.objects.using('default').filter(user_id=user_id, status='active').first()
+        if registry is not None:
+            register_database_connection(db_alias, db_name)
+            UserDatabaseRegistry.objects.using('default').filter(id=registry.id).update(
+                last_used_at=timezone.now()
+            )
+            return db_alias
+
+        logger.info(f"[PROVISION] start: user_id={user_id} db={db_name}")
+
+        # 1. Ensure MySQL database exists on server (Case A: creates, Case C/D: no-op)
+        ensure_mysql_database_exists(db_name)
+        logger.info(f"[PROVISION] database exists/created: {db_name}")
+
+        # 2. Register dynamic Django connection
+        register_database_connection(db_alias, db_name)
+        logger.info(f"[PROVISION] connection registered: {db_alias}")
+
+        # 3. Apply / reconcile migrations (handles Case A, Case C, Case D)
+        reconcile_user_database_migrations(db_alias)
+
+        # 4. Atomically create or update registry row in control database (default)
+        UserDatabaseRegistry.objects.using('default').update_or_create(
+            user_id=user_id,
+            defaults={
+                'username': user.username,
+                'database_name': db_name,
+                'status': 'active',
+                'last_used_at': timezone.now(),
+            }
+        )
+        logger.info(f"[PROVISION] registry reconciled: user_id={user_id} db={db_name}")
+        logger.info(f"[PROVISION] provisioning complete: {db_alias}")
 
     return db_alias

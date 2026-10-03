@@ -5,6 +5,8 @@ import django.db.models.deletion
 
 class Migration(migrations.Migration):
 
+    initial = True
+
     dependencies = [
         ('User', '0003_alter_maliciousbot_options_maliciousbot_confidence_and_more'),
     ]
