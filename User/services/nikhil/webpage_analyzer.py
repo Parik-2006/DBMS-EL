@@ -1,10 +1,12 @@
-import requests
 from bs4 import BeautifulSoup
 import re
 import time
 from urllib.parse import urlparse, urljoin
-import tldextract
 import logging
+
+from User.security import outbound
+from User.security.redaction import redact_headers
+from User.services.domain_normalization import ensure_scheme, registered_domain_for
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +25,7 @@ class WebpageAnalyzer:
     MAX_CONTENT_SIZE = 1024 * 1024  # 1MB
     TIMEOUT = (3.0, 5.0)  # (connect timeout, read timeout)
     MAX_REDIRECTS = 3
+    TOTAL_TIMEOUT = 15.0  # overall wall-clock budget for the fetch (all hops)
     
     USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 (Compatible; PhishScan/1.0)"
 
@@ -59,109 +62,98 @@ class WebpageAnalyzer:
     def analyze_webpage(cls, url):
         """
         Fetch and safely analyze a webpage URL.
-        
-        Args:
-            url: str target URL
-            
-        Returns:
-            dict: Structured webpage evidence
+
+        Phase 1: the fetch goes through ``User.security.outbound.safe_request``:
+        policy-validated, DNS-pinned connection, TLS verified against the
+        hostname, each redirect validated independently (max 3), 1 MB cap.
+        A policy rejection yields status ``BLOCKED`` (never treated as benign).
         """
-        # Ensure scheme
-        target_url = url
-        if not target_url.startswith(('http://', 'https://')):
-            target_url = 'http://' + target_url
-
+        target_url = ensure_scheme(url)
         evidence = cls._initialize_evidence_dict(url, target_url)
-        
-        session = requests.Session()
-        session.max_redirects = cls.MAX_REDIRECTS
-        
+
+        headers = {
+            "User-Agent": cls.USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+        }
         try:
-            headers = {
-                "User-Agent": cls.USER_AGENT,
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.5"
-            }
-
-            response = session.get(
-                target_url,
-                headers=headers,
-                timeout=cls.TIMEOUT,
-                allow_redirects=True,
-                stream=True
+            response = outbound.safe_request(
+                target_url, method='GET', headers=headers,
+                max_bytes=cls.MAX_CONTENT_SIZE, max_redirects=cls.MAX_REDIRECTS,
+                connect_timeout=cls.TIMEOUT[0], read_timeout=cls.TIMEOUT[1],
+                total_timeout=cls.TOTAL_TIMEOUT,
             )
-
-            evidence["final_url"] = response.url
-            evidence["http_status"] = response.status_code
-            evidence["content_type"] = response.headers.get('Content-Type', '')
-            
-            # Security headers
-            for sec_header in ['Strict-Transport-Security', 'Content-Security-Policy', 'X-Frame-Options', 'X-Content-Type-Options']:
-                if sec_header in response.headers:
-                    evidence["security_headers"][sec_header] = response.headers[sec_header]
-
-            evidence["response_headers"] = dict(response.headers)
-
-            # Redirect chain
-            if response.history:
-                evidence["redirect_chain"] = [r.url for r in response.history] + [response.url]
-                # Check suspicious redirect
-                orig_domain = cls._extract_registered_domain(target_url)
-                final_domain = cls._extract_registered_domain(response.url)
-                if orig_domain and final_domain and orig_domain != final_domain:
-                    evidence["indicators"].append("SUSPICIOUS_REDIRECT")
-                    evidence["findings"].append(f"Redirect changed domain from {orig_domain} to {final_domain}")
-
-            # Safety check: Content-Type
-            content_type_lower = evidence["content_type"].lower()
-            if not any(t in content_type_lower for t in ['text/html', 'application/xhtml+xml', 'text/plain']):
-                evidence["status"] = "SKIPPED"
-                evidence["error"] = f"Unsupported non-HTML content type: {evidence['content_type']}"
-                return evidence
-
-            # Safety check: Content-Length header
-            content_length = response.headers.get('Content-Length')
-            if content_length and int(content_length) > cls.MAX_CONTENT_SIZE:
-                evidence["status"] = "SKIPPED"
-                evidence["error"] = f"Content exceeds size limit: {content_length} bytes"
-                return evidence
-
-            # Safe chunked reading up to 1MB
-            raw_bytes = bytearray()
-            for chunk in response.iter_content(chunk_size=8192):
-                raw_bytes.extend(chunk)
-                if len(raw_bytes) > cls.MAX_CONTENT_SIZE:
-                    evidence["findings"].append("Response truncated at 1MB limit")
-                    break
-
-            encoding = response.encoding or 'utf-8'
-            try:
-                html_text = raw_bytes.decode(encoding, errors='replace')
-            except Exception:
-                html_text = raw_bytes.decode('utf-8', errors='replace')
-
-            # Analyze the parsed HTML
-            cls._parse_html_content(html_text, evidence, base_url=response.url)
-            evidence["status"] = "SUCCESS"
-
-        except requests.exceptions.Timeout:
-            evidence["status"] = "TIMEOUT"
-            evidence["error"] = "Connection/Read Timeout during webpage fetch"
-        except requests.exceptions.TooManyRedirects:
-            evidence["status"] = "REDIRECT_ERROR"
-            evidence["error"] = "Exceeded maximum redirect limit (3)"
-            evidence["indicators"].append("SUSPICIOUS_REDIRECT")
-        except requests.exceptions.SSLError as ssl_err:
-            evidence["status"] = "SSL_ERROR"
-            evidence["error"] = f"SSL Certificate Error: {str(ssl_err)}"
-        except requests.exceptions.RequestException as req_err:
-            evidence["status"] = "FAILED"
-            evidence["error"] = f"HTTP Request Error: {str(req_err)}"
+        except outbound.OutboundBlocked as blocked:
+            if blocked.reason == 'too_many_redirects':
+                evidence["status"] = "REDIRECT_ERROR"
+                evidence["error"] = f"Exceeded maximum redirect limit ({cls.MAX_REDIRECTS})"
+                evidence["indicators"].append("SUSPICIOUS_REDIRECT")
+            else:
+                evidence["status"] = "BLOCKED"
+                evidence["security_block"] = blocked.reason
+                evidence["error"] = f"Destination blocked by outbound security policy: {blocked.reason}"
+            return evidence
+        except outbound.OutboundError as err:
+            if err.reason == 'timeout' or err.reason == 'dns_timeout':
+                evidence["status"] = "TIMEOUT"
+                evidence["error"] = "Connection/Read Timeout during webpage fetch"
+            elif err.reason == 'tls_error':
+                evidence["status"] = "SSL_ERROR"
+                evidence["error"] = "SSL Certificate Error during webpage fetch"
+            else:
+                evidence["status"] = "FAILED"
+                evidence["error"] = f"HTTP Request Error: {err.reason}"
+            return evidence
         except Exception as e:
             evidence["status"] = "ERROR"
-            evidence["error"] = f"Unexpected analysis error: {str(e)}"
-            logger.exception("Webpage analysis error")
+            evidence["error"] = f"Unexpected analysis error: {type(e).__name__}"
+            logger.error("Webpage analysis error: %s", type(e).__name__)
+            return evidence
 
+        evidence["final_url"] = response.url
+        evidence["http_status"] = response.status
+        lower_headers = {k.lower(): v for k, v in response.headers.items()}
+        evidence["content_type"] = lower_headers.get('content-type', '')
+        for sec_header in ['Strict-Transport-Security', 'Content-Security-Policy', 'X-Frame-Options', 'X-Content-Type-Options']:
+            if sec_header.lower() in lower_headers:
+                evidence["security_headers"][sec_header] = lower_headers[sec_header.lower()]
+        # Cookies / authorization headers from the target are never persisted.
+        evidence["response_headers"] = redact_headers(dict(response.headers))
+
+        if response.history:
+            evidence["redirect_chain"] = list(response.history)
+            orig_domain = cls._extract_registered_domain(target_url)
+            final_domain = cls._extract_registered_domain(response.url)
+            if orig_domain and final_domain and orig_domain != final_domain:
+                evidence["indicators"].append("SUSPICIOUS_REDIRECT")
+                evidence["findings"].append(f"Redirect changed domain from {orig_domain} to {final_domain}")
+
+        content_type_lower = evidence["content_type"].lower()
+        if not any(t in content_type_lower for t in ['text/html', 'application/xhtml+xml', 'text/plain']):
+            evidence["status"] = "SKIPPED"
+            evidence["error"] = f"Unsupported non-HTML content type: {evidence['content_type']}"
+            return evidence
+
+        content_length = lower_headers.get('content-length')
+        if content_length and content_length.isdigit() and int(content_length) > cls.MAX_CONTENT_SIZE:
+            evidence["status"] = "SKIPPED"
+            evidence["error"] = f"Content exceeds size limit: {content_length} bytes"
+            return evidence
+
+        if response.truncated:
+            evidence["findings"].append("Response truncated at 1MB limit")
+
+        encoding = 'utf-8'
+        match = re.search(r'charset=([\w.-]+)', content_type_lower)
+        if match:
+            encoding = match.group(1)
+        try:
+            html_text = response.body.decode(encoding, errors='replace')
+        except LookupError:
+            html_text = response.body.decode('utf-8', errors='replace')
+
+        cls._parse_html_content(html_text, evidence, base_url=response.url)
+        evidence["status"] = "SUCCESS"
         return evidence
 
     @classmethod
@@ -216,6 +208,7 @@ class WebpageAnalyzer:
                 "num_inputs": 0,
                 "num_images": 0
             },
+            "security_block": None,
             "error": None,
             "timestamp": time.time()
         }
@@ -374,11 +367,6 @@ class WebpageAnalyzer:
     @staticmethod
     def _extract_registered_domain(url_str):
         try:
-            parsed = urlparse(url_str)
-            host = parsed.hostname or url_str
-            extracted = tldextract.extract(host)
-            if extracted.domain and extracted.suffix:
-                return f"{extracted.domain}.{extracted.suffix}".lower()
-            return host.lower()
+            return registered_domain_for(url_str)
         except Exception:
             return ""
