@@ -28,17 +28,18 @@ Before collectors run, `HistoricalIntelligenceService` queries MySQL relational 
 
 ### 3.1 Webpage & DOM Analyzer (`WebpageAnalyzer`)
 - **Safe Retrieval**: Fetches HTML using bounded timeouts and safe headers.
-- **Form Inspection**: Detects password inputs, credit card fields, and external `action` targets.
-- **Phishing Heuristics**: Flags cross-domain form submissions, concealed iframes, fake login overlays, and brand name mismatches.
+- **Form Inspection**: Detects password inputs and external (cross-domain) `action` targets.
+- **Phishing Heuristics**: Flags cross-domain form submissions, concealed iframes, hidden content, eval-style scripts, executable download links, credential-harvesting and defacement phrases. (No brand-mismatch detection.)
+- **Outbound safety (Phase 1)**: fetches go through `User/security/outbound.py` (public destinations only, DNS-pinned, redirects validated per hop); blocked targets yield status `BLOCKED`.
 
 ### 3.2 Network, DNS & SSL Analyzer (`NetworkAnalyzer`)
-- **Resolution**: Gathers IPv4/IPv6 addresses, reverse DNS PTR records, and MX records.
-- **SSL/TLS Validation**: Validates certificate chain, issuer authority, self-signed status, and remaining validity window (flagging newly issued certificates < 14 days old).
+- **Resolution**: Resolves and validates A/AAAA addresses (public only) and reverse DNS PTR. (No MX records.)
+- **SSL/TLS Validation**: Validates the certificate chain against the hostname on the pinned IP, records issuer/subject/validity and expiry. `verified=None` means no handshake was possible (not an invalid certificate). (No certificate-age check.)
 
 ### 3.3 Visual Analyzer (`VisualAnalyzer`)
 - **Automated Capture**: Uses headless Playwright / Chromium to render the page in a secure sandbox.
-- **Storage**: Saves visual evidence to `screenshots/scan_<id>_<timestamp>.png`.
-- **Perceptual Image Hash**: Computes difference hash (dHash) to group visually similar phishing kits.
+- **Storage**: `MEDIA_ROOT/screenshots/<tenant>/<investigation-uuid>.png`, served only to the scan owner (Phase 1).
+- **Egress control (Phase 1)**: all browser requests are intercepted and fulfilled by the pinned outbound transport; JS, downloads and service workers are disabled. (No perceptual hashing.)
 
 ### 3.4 Threat Intelligence Engine (`ThreatIntelService`)
 Integrates three verified free community providers plus local database correlation:
@@ -46,13 +47,13 @@ Integrates three verified free community providers plus local database correlati
 - **URLhaus (`URLhausProvider`)**: Queries active malware distribution URLs and payloads.
 - **AbuseIPDB (`AbuseIPDBProvider`)**: Assesses IP abuse confidence scores and historical attack reports.
 - **Free-Only Guard (`free_only_guard.py`)**: Intercepts requests and enforces hard blocks against commercial paid services (VirusTotal, AlienVault, Shodan, Recorded Future).
-- **Trusted Domain Catalog (`TrustedDomainService`)**: Maintains top 10,000 domains (Google, Microsoft, Cloudflare, Instagram, etc.) to immediately dampen false positive alarms on verified platforms.
+- **Trusted Domain Catalog (`TrustedDomainService`)**: Maintains a curated list of 44 well-known domains plus trusted TLDs as supporting evidence (never an automatic Benign).
 - **Local SQL Historical Correlation**: Delegates to `HistoricalIntelligenceService` over MySQL models.
 
 ### 3.5 Prompt-Injection Detector (`PromptInjectionDetector`)
 - Analyzes extracted webpage text and hidden tags for prompt-injection attacks.
 - Identifies jailbreak patterns targeting downstream LLMs.
-- Strips or neutralizes adversarial text before AI evaluation.
+- Produces a detection signal only; the AI never receives raw page text (only normalized findings), which is the actual injection defence.
 
 ### 3.6 AI Gatekeeper & Provider Manager (`AIAnalyzer`)
 - **AIGatekeeper**: Evaluates whether AI analysis is necessary. If deterministic indicators are already conclusive or rate limits are approached, AI execution is skipped (`status: NOT_RUN`).
@@ -76,7 +77,7 @@ The `FinalClassifier` corroborates multi-source evidence using an engineering sc
 | **AI Advisory** | Assessment confirms standard benign site | Assessment identifies phishing indicators or deceptive intent |
 
 ### Decision Flow:
-1. **Definite Threat**: If ThreatFox or URLhaus returns an active confirmed malware/phishing match $\rightarrow$ immediate threat classification (`HIGH` or `CRITICAL` risk).
+1. **Threat-intel matches**: ThreatFox (+3.0) and URLhaus (+3.5) matches add weighted Malware/Phishing evidence; a single match can still end as `Unknown` when it conflicts with other evidence (no automatic verdict).
 2. **Corroborated Threat**: If two or more independent families show strong positive signals $\rightarrow$ classify as `Phishing` / `Malware` / `Defacement`.
 3. **Corroborated Benign**: If trusted domain is verified and all collectors report clean status $\rightarrow$ classify as `Benign` (`LOW` risk).
 4. **Conflict / Ambiguity**: If signals contradict or evidence is insufficient $\rightarrow$ classify as `Unknown` (`MEDIUM` risk, status `NEEDS_REVIEW`).
@@ -84,6 +85,8 @@ The `FinalClassifier` corroborates multi-source evidence using an engineering sc
 ---
 
 ## 5. API Endpoints
+
+> Phase 1: browser APIs require login, CSRF for unsafe methods and scan ownership in the caller's own tenant database; `POST /api/fallback/result/` requires `Authorization: Bearer $FALLBACK_SERVICE_TOKEN` plus `tenant_id` and `investigation_id`; `POST /api/nikhil/submit-review/` requires the `User.submit_review` permission (Analyst role). See `docs/PHASE1_IMPLEMENTATION.md`.
 
 - `POST /api/fallback/result/`: Ingests deep analysis results and updates SQL/MongoDB.
 - `GET /api/fallback/uncertain-scans/`: Returns queue of uncertain scans awaiting fallback processing.

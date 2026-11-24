@@ -102,9 +102,9 @@ Before deep analysis begins, `HistoricalIntelligenceService` queries MySQL histo
 
 ## 4. Nikhil Deterministic Fallback & Collectors
 
-1. **Webpage / DOM Analyzer (`WebpageAnalyzer`)**: Fetches HTML safely, detects credential theft forms, external form targets, hidden iframes, and fake login overlays.
+1. **Webpage / DOM Analyzer (`WebpageAnalyzer`)**: Fetches HTML safely, detects password forms, cross-domain form targets, hidden iframes/content, eval-style scripts, executable download links and defacement/credential phrases. Since Phase 1 every fetch goes through the SSRF-safe outbound policy (`User/security/outbound.py`, DNS-pinned, per-hop redirect validation).
 2. **Network / DNS / SSL Analyzer (`NetworkAnalyzer`)**: Resolves IP addresses, reverse DNS, and inspects SSL/TLS certificates.
-3. **Visual / Screenshot Analyzer (`VisualAnalyzer`)**: Headless Playwright/Chromium engine captures visual proof and computes perceptual image hashes.
+3. **Visual / Screenshot Analyzer (`VisualAnalyzer`)**: Headless Playwright/Chromium captures a screenshot only (no image analysis / perceptual hashing). Since Phase 1 the browser's traffic is forced through the pinned outbound transport (black-hole proxy + `route.fulfill`); disable with `VISUAL_ANALYSIS_ENABLED=false`.
 4. **Threat Intelligence Engine (`ThreatIntelService`)**: Queries ThreatFox, URLhaus, AbuseIPDB with strict `free_only_guard` preventing commercial/paid API access.
 5. **Prompt-Injection Detector (`PromptInjectionDetector`)**: Neutralizes adversarial prompt injections targeting LLMs.
 6. **AI Analysis Engine (`AIAnalyzer` + `AIGatekeeper` + `EvidenceNormalizer`)**:

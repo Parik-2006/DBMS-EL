@@ -51,9 +51,9 @@ Dataset
   ↓
 Feature Extraction
   ↓
-80% Training ──→ Random Forest learns patterns
+70% Training ──→ Random Forest learns patterns
   ↓
-20% Testing ───→ Model evaluation
+30% Testing ───→ held out (not evaluated in code)
 
 
 The model classifies URLs into:
@@ -88,7 +88,7 @@ The model classifies URLs into:
 - Django Template Language
 
 ### Database & Deployment
-- SQLite / Django ORM
+- MySQL (per-user tenant databases, Django ORM) + MongoDB (forensic evidence)
 - WhiteNoise
 - WSGI / ASGI
 
@@ -125,12 +125,22 @@ Open: [https://github.com/Parik-2006/diploma-project](https://github.com/Parik-2
 
 ## 📚 Documentation
 
-Detailed technical documentation is consolidated under the [`docs/`](file:///P:/DBMS%20EL/diploma-project/docs/) directory:
+Detailed technical documentation is consolidated under the [`docs/`](docs/) directory:
 
-- [System Architecture & ML Pipeline Specification](file:///P:/DBMS%20EL/diploma-project/docs/ARCHITECTURE.md): Comprehensive system flow, PARI 10-feature extraction, Random Forest pipeline, and fallback orchestration.
-- [Database Architecture & Schema Specification](file:///P:/DBMS%20EL/diploma-project/docs/DATABASE.md): MySQL dual-database routing (`maliciousbot_core`, `maliciousbot_guest`), normalized schemas, and MongoDB Atlas evidence store (`deep_analysis_cases`).
-- [Nikhil Fallback Subsystem Specification](file:///P:/DBMS%20EL/diploma-project/docs/NIKHIL.md): Deterministic 6-module evidence collector pipeline, community threat intel, free-only policy, and multi-family corroboration.
-- [Verification & Validation Report](file:///P:/DBMS%20EL/diploma-project/docs/VERIFICATION.md): Full automated test suite results (145 tests), real runtime scan logs, and security guardrail verification.
+- [System Architecture & ML Pipeline Specification](docs/ARCHITECTURE.md): Comprehensive system flow, PARI 10-feature extraction, Random Forest pipeline, and fallback orchestration.
+- [Database Architecture & Schema Specification](docs/DATABASE.md): MySQL dual-database routing (`maliciousbot_core`, `maliciousbot_guest`), normalized schemas, and MongoDB Atlas evidence store (`deep_analysis_cases`).
+- [Nikhil Fallback Subsystem Specification](docs/NIKHIL.md): Deterministic 6-module evidence collector pipeline, community threat intel, free-only policy, and multi-family corroboration.
+- [Verification & Validation Report](docs/VERIFICATION.md): historical verification notes (its `tests_local/` suite is git-ignored and not in the repository).
+- [Phase 1 Implementation Report](docs/PHASE1_IMPLEMENTATION.md): tenant isolation, SSRF protection, transactional persistence, API security and hardening (MaliciousBot 2.0, branch `branch1`).
+
+## 🧪 Tests
+
+```bash
+# Phase 1 regression suite (isolated SQLite tenants; no MySQL/MongoDB/external APIs)
+python manage.py test User.tests --settings=MaliciousBot.settings_test
+# Deployment / configuration suite (default settings, no database connection)
+python manage.py test User.test_deployment
+```
 
 ---
 

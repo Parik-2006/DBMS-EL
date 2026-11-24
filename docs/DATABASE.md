@@ -24,7 +24,7 @@ MaliciousBot implements a production-grade dual-database hybrid architecture whe
                     ▲                                         ▲
                     └────────────────────┬────────────────────┘
                                    scan_id
-                         (Strict 1-to-1 Logical Link)
+              (tenant_id, scan_id) + investigation_id   [Phase 1]
 ```
 
 ### 1.1 Why MySQL Exists:
@@ -36,7 +36,7 @@ MaliciousBot implements a production-grade dual-database hybrid architecture whe
 
 ### 1.2 Why MongoDB Exists:
 - **Full Flexible Investigation Case**: Complete deep-analysis cases containing nested, polymorphic evidence documents.
-- **Detailed Forensic Evidence**: Retains entire DOM element trees, network route hops, raw TLS handshake headers, and visual perceptual hash hashes that do not fit into rigid relational tables.
+- **Detailed Forensic Evidence**: Retains the full nested collector outputs (forms, links, redirect chains, TLS certificate fields, threat-intel provider payloads, AI attempt logs). Since Phase 1 documents are keyed by `(tenant_id, scan_id)` plus the global `investigation_id`, and are redacted (cookies, authorization headers, API keys) before storage. See `docs/PHASE1_IMPLEMENTATION.md`.
 - **Detailed AI Case Information**: Full prompts, gatekeeper evaluations, and model execution metrics.
 - **Zero Wholesale Duplication**: MongoDB holds the raw forensic evidence; MySQL holds bounded relational intelligence summaries.
 
@@ -71,7 +71,7 @@ Django handles multi-tenancy and guest isolation using `User.db_manager` and `Us
 - **Purpose**: Normalized IP address catalog for network correlation.
 - **Key Fields**: `ip_address` (GenericIPAddress, UNIQUE, INDEX), `status` (VARCHAR 20), `country` (VARCHAR 100), `risk_score` (FLOAT).
 - **Relations**: Referenced by network correlation and threat indicators.
-- **Written by**: `NetworkAnalyzer`.
+- **Written by**: `FallbackIntegrationService.link_observed_ip` (Phase 1) from validated public IPs observed by `NetworkAnalyzer`; linked to scans via `pari_scan.ip_id`.
 - **Read by**: `HistoricalIntelligenceService`.
 
 ### 3.4 `pari_scan`
@@ -133,7 +133,7 @@ Django handles multi-tenancy and guest isolation using `User.db_manager` and `Us
 
 ### 3.12 `pari_final_decision` (Phase 10)
 - **Purpose**: Authoritative final classification and risk decision established by deterministic corroboration or confident ML.
-- **Key Fields**: `scan_id` (OneToOne -> `pari_scan`, CASCADE), `final_classification` (VARCHAR 20, INDEX), `risk_score` (FLOAT, INDEX), `risk_level` (VARCHAR 20, INDEX), `decision_status` (VARCHAR 30: FINAL, CONFIDENT_ML, NEEDS_REVIEW, OVERRIDDEN), `decision_method` (VARCHAR 50: DETERMINISTIC_CORROBORATION, INITIAL_ML), `corroboration_strength` (VARCHAR 30), `evidence_family_count` (INT), `conflict_detected` (BOOLEAN, INDEX), `decision_summary` (VARCHAR 500), `decision_timestamp` (DATETIME, INDEX).
+- **Key Fields**: `scan_id` (OneToOne -> `pari_scan`, CASCADE), `final_classification` (VARCHAR 20, INDEX), `risk_score` (FLOAT, INDEX), `risk_level` (VARCHAR 20, INDEX), `decision_status` (VARCHAR 30: FINAL, CONFIDENT_ML, NEEDS_REVIEW, OVERRIDDEN), `decision_method` (VARCHAR 50: DETERMINISTIC_CORROBORATION, INITIAL_CONFIDENT_PREDICTION, ANALYST_REVIEW), `corroboration_strength` (VARCHAR 30), `evidence_family_count` (INT), `conflict_detected` (BOOLEAN, INDEX), `decision_summary` (VARCHAR 500), `decision_timestamp` (DATETIME, INDEX).
 - **Written by**: `FallbackIntegrationService.persist_final_decision` & `MLPredictionService`.
 - **Read by**: UI, reporting layer, user history listings.
 
