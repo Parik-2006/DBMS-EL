@@ -531,7 +531,8 @@ class HealthEndpointTests(SimpleTestCase):
         self.assertEqual(response.status_code, 503)
         payload = json.loads(response.content)
         self.assertEqual(payload['status'], 'error')
-        self.assertIn('boom', payload['message'])
+        # Phase 1: internal exception details are never exposed publicly.
+        self.assertNotIn('boom', response.content.decode())
 
     def test_health_does_not_provision_databases(self):
         """Render polls /health; it must not run CREATE DATABASE on every hit."""
@@ -557,9 +558,27 @@ class HealthEndpointTests(SimpleTestCase):
         self.assertEqual(response.status_code, 200)
         payload = json.loads(response.content)
         self.assertEqual(payload['database']['status'], 'OK')
+        # Phase 1: anonymous callers get only the overall status, no counts/system info.
+        self.assertNotIn('users', payload['database'])
+        self.assertNotIn('environment', payload)
+        train.assert_not_called()
+
+    def test_status_details_require_staff(self):
+        import json
+
+        from django.contrib.auth.models import User as AuthUser
+        from django.test import RequestFactory
+
+        from User import views
+        from User.models import MaliciousBot
+
+        request = RequestFactory().get('/status')
+        request.user = mock.MagicMock(is_authenticated=True, is_staff=True)
+        with stubbed_connection_cursor(),                 mock.patch.object(AuthUser.objects, 'count', return_value=3),                 mock.patch.object(MaliciousBot.objects, 'count', return_value=7):
+            payload = json.loads(views.status(request).content)
         self.assertEqual(payload['database']['users'], 3)
         self.assertEqual(payload['database']['predictions'], 7)
-        train.assert_not_called()
+        self.assertIn('ml_system', payload)
 
     def test_status_degrades_when_database_is_unreachable(self):
         import json
@@ -689,8 +708,12 @@ class GracefulDegradationTests(SimpleTestCase):
     def test_visual_analyzer_keeps_safety_flags(self):
         from User.services.nikhil.visual_analyzer import VisualAnalyzer
 
-        self.assertEqual(VisualAnalyzer.NAVIGATION_TIMEOUT_MS, 5000)
-        self.assertEqual(VisualAnalyzer.TOTAL_TIMEOUT_MS, 10000)
+        # Raised deliberately in commit 9a4a5a1 ("enable Render visual snapshots").
+        self.assertEqual(VisualAnalyzer.NAVIGATION_TIMEOUT_MS, 8000)
+        self.assertEqual(VisualAnalyzer.TOTAL_TIMEOUT_MS, 12000)
+        # Phase 1: browser egress is controlled and TLS errors are not ignored.
+        self.assertIn('--dns-prefetch-disable', VisualAnalyzer.BROWSER_ARGS)
+        self.assertEqual(VisualAnalyzer.BLACKHOLE_PROXY, 'http://127.0.0.1:9')
 
     def test_mongodb_repository_degrades_without_uri(self):
         from User.services.nikhil.mongodb_repository import MongoDBRepository
@@ -699,10 +722,13 @@ class GracefulDegradationTests(SimpleTestCase):
             repo = MongoDBRepository()
 
         self.assertFalse(repo.is_available())
-        # Storing still returns a reference instead of raising.
-        reference = repo.store_evidence({'scan_id': 999})
-        self.assertEqual(reference, 'local-cache-scan-999')
-        self.assertEqual(repo.get_evidence(999)['scan_id'], 999)
+        # Storing still returns a (non-durable, tenant-scoped) reference instead of raising.
+        reference = repo.store_evidence({'scan_id': 999}, tenant_id='user:1')
+        self.assertEqual(reference, 'local-cache:user:1:999')
+        self.assertFalse(repo.last_store_durable)
+        self.assertEqual(repo.get_evidence(999, tenant_id='user:1')['scan_id'], 999)
+        # Another tenant can never read it.
+        self.assertIsNone(repo.get_evidence(999, tenant_id='user:2'))
 
     def test_mongodb_defaults_match_expected_atlas_targets(self):
         from User.services.nikhil.mongodb_repository import MongoDBRepository
@@ -1383,8 +1409,8 @@ class FastProvisioningAndPerformanceTests(SimpleTestCase):
             response = self.client.post('/register', {
                 'username': 'newreg',
                 'email': 'newreg@example.com',
-                'password': 'password123',
-                'password2': 'password123',
+                'password': 'Vx7#qLm2!rTz9w',
+                'password2': 'Vx7#qLm2!rTz9w',
             })
 
             self.assertEqual(response.status_code, 302)
