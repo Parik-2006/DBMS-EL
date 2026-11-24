@@ -1,6 +1,8 @@
 from django.shortcuts import render
 from django.http import HttpResponseRedirect, JsonResponse
+from django.views.decorators.http import require_POST
 from datetime import datetime
+import logging
 # Create your views here.
 from django.contrib.auth.models import User,auth
 from django.contrib import messages
@@ -325,526 +327,515 @@ if os.environ.get('RENDER') or os.environ.get('PRODUCTION') or not os.path.exist
     # Model will be trained lazily on first prediction request
     print("Running in production mode - model training will happen on first prediction request")
 
+logger = logging.getLogger(__name__)
+
+URL_MAX_LENGTH = 500  # pari_url.url column length (strict SQL mode rejects longer values)
+_URL_FORBIDDEN_CHARS = re.compile(r'[\x00-\x20\x7f]')
+_GENERIC_ERROR = 'An internal error occurred while processing your request. Please try again.'
+
+
+def _validate_submitted_url(url):
+    """Light submission validation. Outbound safety is enforced separately by the collectors."""
+    if not url:
+        return 'URL cannot be empty'
+    if len(url) > URL_MAX_LENGTH:
+        return f'URL is too long (maximum {URL_MAX_LENGTH} characters)'
+    if _URL_FORBIDDEN_CHARS.search(url):
+        return 'URL must not contain whitespace or control characters'
+    if '://' in url:
+        scheme = url.split('://', 1)[0].lower()
+        if scheme not in ('http', 'https'):
+            return 'Only http:// and https:// URLs can be analysed'
+    from User.services.domain_normalization import normalize_url
+    if not normalize_url(url).hostname:
+        return 'URL must include a valid host name'
+    return None
+
+
+def _too_many_requests(request, template, message, retry_after, context=None):
+    messages.error(request, message)
+    response = render(request, template, context or {})
+    response.status_code = 429
+    response['Retry-After'] = str(retry_after)
+    return response
+
+
 def index(request):
-    return render(request,'index.html')
+    return render(request, 'index.html')
+
 
 def register(request):
-    if request.method == 'POST':
-        try:
-            print(f"[REGISTER] Starting POST request")
-            
-            # Get form data
-            try:
-                username = request.POST.get('username', '').strip()
-                email = request.POST.get('email', '').strip()
-                password = request.POST.get('password', '')
-                password2 = request.POST.get('password2', '')
-                print(f"[REGISTER] Form data received: username={username}, email={email}")
-            except Exception as e:
-                print(f"[REGISTER] Error getting form data: {str(e)}")
-                print(traceback.format_exc())
-                return render(request, 'register.html')
-
-            # Validate inputs
-            if not username or not email or not password:
-                print(f"[REGISTER] Validation failed: missing fields")
-                messages.error(request, 'All fields are required')
-                return render(request, 'register.html')
-
-            # Check password match
-            if password != password2:
-                print(f"[REGISTER] Passwords do not match")
-                messages.info(request, 'Password not matching')
-                return render(request, 'register.html')
-
-            # Check email exists
-            try:
-                if User.objects.filter(email=email).exists():
-                    print(f"[REGISTER] Email already exists: {email}")
-                    messages.info(request, 'Email already exists')
-                    return render(request, 'register.html')
-            except Exception as e:
-                print(f"[REGISTER] Error checking email: {str(e)}")
-                print(traceback.format_exc())
-                messages.error(request, f'Database error while checking email: {str(e)}')
-                return render(request, 'register.html')
-
-            # Check username exists
-            try:
-                if User.objects.filter(username=username).exists():
-                    print(f"[REGISTER] Username already exists: {username}")
-                    messages.info(request, 'Username already exists')
-                    return render(request, 'register.html')
-            except Exception as e:
-                print(f"[REGISTER] Error checking username: {str(e)}")
-                print(traceback.format_exc())
-                messages.error(request, f'Database error while checking username: {str(e)}')
-                return render(request, 'register.html')
-
-            # Create user in control database and provision isolated user MySQL database
-            created_user = None
-            try:
-                import time
-                t0 = time.perf_counter()
-                print(f"[REGISTER] Creating user: {username}")
-                created_user = User.objects.create_user(username=username, email=email, password=password)
-                t_user = time.perf_counter()
-                print(f"[REGISTER-TIMING] User creation took {(t_user - t0):.3f}s: {username}")
-                
-                # Provision dedicated MySQL database for this user
-                from User.db_manager import ensure_user_database
-                ensure_user_database(created_user)
-                t_prov = time.perf_counter()
-                print(f"[REGISTER-TIMING] Database provisioning took {(t_prov - t_user):.3f}s (total registration: {(t_prov - t0):.3f}s)")
-                
-                print(f"[REGISTER] User and database created successfully: {username}")
-                messages.success(request, 'Registration successful! Please login.')
-                return HttpResponseRedirect('/login')
-            except Exception as e:
-                print(f"[REGISTER] Error during user or database creation: {str(e)}")
-                print(traceback.format_exc())
-                if created_user and created_user.id:
-                    try:
-                        created_user.delete()
-                    except Exception:
-                        pass
-                messages.error(request, 'Error creating account and provisioning workspace. Please try again.')
-                return render(request, 'register.html')
-
-
-        except Exception as e:
-            print(f"[REGISTER] CRITICAL ERROR: {str(e)}")
-            print(traceback.format_exc())
-            messages.error(request, 'An error occurred during registration')
-            return render(request, 'register.html')
-    else:
+    if request.method != 'POST':
         return render(request, 'register.html')
 
+    from django.contrib.auth.password_validation import validate_password
+    from django.contrib.auth.validators import UnicodeUsernameValidator
+    from django.core.exceptions import ValidationError
+    from django.core.validators import validate_email
+    from User.security import ratelimit
+
+    allowed, retry_after = ratelimit.hit('register', f"ip:{ratelimit.client_ip(request)}")
+    if not allowed:
+        return _too_many_requests(request, 'register.html',
+                                  'Too many registration attempts. Please try again later.', retry_after)
+
+    username = request.POST.get('username', '').strip()
+    email = request.POST.get('email', '').strip()
+    password = request.POST.get('password', '')
+    password2 = request.POST.get('password2', '')
+
+    if not username or not email or not password:
+        messages.error(request, 'All fields are required')
+        return render(request, 'register.html')
+    try:
+        if len(username) > 150:
+            raise ValidationError('Username is too long')
+        UnicodeUsernameValidator()(username)
+    except ValidationError:
+        messages.error(request, 'Username may contain only letters, digits and @/./+/-/_ (max 150 characters)')
+        return render(request, 'register.html')
+    try:
+        validate_email(email)
+    except ValidationError:
+        messages.error(request, 'Enter a valid email address')
+        return render(request, 'register.html')
+    if password != password2:
+        messages.info(request, 'Password not matching')
+        return render(request, 'register.html')
+    try:
+        validate_password(password, user=User(username=username, email=email))
+    except ValidationError as exc:
+        for msg in exc.messages:
+            messages.error(request, msg)
+        return render(request, 'register.html')
+
+    try:
+        exists = (User.objects.filter(username__iexact=username).exists()
+                  or User.objects.filter(email__iexact=email).exists())
+    except Exception as exc:
+        logger.error("[REGISTER] account lookup failed: %s", type(exc).__name__)
+        messages.error(request, _GENERIC_ERROR)
+        return render(request, 'register.html')
+    if exists:
+        # One generic message for username OR email collisions (limits account enumeration).
+        messages.info(request, 'An account with these details already exists. Please choose different details or log in.')
+        return render(request, 'register.html')
+
+    created_user = None
+    try:
+        created_user = User.objects.create_user(username=username, email=email, password=password)
+        from User.db_manager import ensure_user_database
+        ensure_user_database(created_user)
+        logger.info("[REGISTER] account created and workspace provisioned (user id %s)",
+                    getattr(created_user, 'id', '?'))
+        messages.success(request, 'Registration successful! Please login.')
+        return HttpResponseRedirect('/login')
+    except Exception as exc:
+        logger.error("[REGISTER] account/workspace provisioning failed: %s", type(exc).__name__)
+        if created_user is not None and getattr(created_user, 'id', None):
+            try:
+                created_user.delete()
+            except Exception:
+                logger.error("[REGISTER] could not roll back partially created account")
+        messages.error(request, 'Error creating account and provisioning workspace. Please try again.')
+        return render(request, 'register.html')
+
+
+def _rate_limited_login(request, username, template):
+    """Shared IP + username throttling for both login forms. Returns a response or None."""
+    from User.security import ratelimit
+    ip_ok, ip_retry = ratelimit.hit('login_ip', f"ip:{ratelimit.client_ip(request)}")
+    if not ip_ok:
+        return _too_many_requests(request, template, 'Too many login attempts. Please try again later.', ip_retry)
+    if username and ratelimit.peek_exceeded('login_user', f"user:{username.lower()}"):
+        return _too_many_requests(request, template, 'Too many login attempts. Please try again later.', 60)
+    return None
+
+
+def _record_login_failure(username):
+    from User.security import ratelimit
+    if username:
+        ratelimit.hit('login_user', f"user:{username.lower()}")
+
+
 def login(request):
-    if request.method == 'POST':
-        try:
-            print(f"[LOGIN] Starting POST request")
-            
-            try:
-                username = request.POST.get('username', '').strip()
-                password = request.POST.get('password', '')
-                print(f"[LOGIN] Form data received: username={username}")
-            except Exception as e:
-                print(f"[LOGIN] Error getting form data: {str(e)}")
-                print(traceback.format_exc())
-                return render(request, 'login.html')
-
-            if not username or not password:
-                print(f"[LOGIN] Validation failed: missing fields")
-                messages.error(request, 'Username and password are required')
-                return render(request, 'login.html')
-
-            try:
-                print(f"[LOGIN] Authenticating user: {username}")
-                user = auth.authenticate(username=username, password=password)
-                
-                if user is not None:
-                    print(f"[LOGIN] Authentication successful for: {username}")
-                    auth.login(request, user)
-                    messages.success(request, f'Welcome back, {username}!')
-                    return HttpResponseRedirect('/predict')
-                else:
-                    print(f"[LOGIN] Authentication failed for: {username}")
-                    messages.info(request, 'Invalid credentials')
-                    return render(request, 'login.html')
-            except Exception as e:
-                print(f"[LOGIN] Error during authentication: {str(e)}")
-                print(traceback.format_exc())
-                messages.error(request, f'Authentication error: {str(e)}')
-                return render(request, 'login.html')
-        except Exception as e:
-            print(f"[LOGIN] CRITICAL ERROR: {str(e)}")
-            print(traceback.format_exc())
-            messages.error(request, 'An error occurred during login')
-            return render(request, 'login.html')
-    else:
+    if request.method != 'POST':
         return render(request, 'login.html')
+    username = request.POST.get('username', '').strip()
+    password = request.POST.get('password', '')
+    if not username or not password:
+        messages.error(request, 'Username and password are required')
+        return render(request, 'login.html')
+    limited = _rate_limited_login(request, username, 'login.html')
+    if limited:
+        return limited
+    try:
+        user = auth.authenticate(request, username=username, password=password)
+    except Exception as exc:
+        logger.error("[LOGIN] authentication backend error: %s", type(exc).__name__)
+        messages.error(request, _GENERIC_ERROR)
+        return render(request, 'login.html')
+    if user is None:
+        _record_login_failure(username)
+        messages.info(request, 'Invalid username or password')
+        return render(request, 'login.html')
+    auth.login(request, user)
+    messages.success(request, f'Welcome back, {user.username}!')
+    return HttpResponseRedirect('/predict')
+
 
 def adminlogin(request):
-    if request.method == 'POST':
-        try:
-            print(f"[ADMINLOGIN] Starting POST request")
-            
-            try:
-                username = request.POST.get('username', '').strip()
-                password = request.POST.get('password', '')
-                print(f"[ADMINLOGIN] Form data received: username={username}")
-            except Exception as e:
-                print(f"[ADMINLOGIN] Error getting form data: {str(e)}")
-                print(traceback.format_exc())
-                return render(request, 'adminlogin.html')
-
-            if not username or not password:
-                print(f"[ADMINLOGIN] Validation failed: missing fields")
-                messages.error(request, 'Username and password are required')
-                return render(request, 'adminlogin.html')
-
-            try:
-                print(f"[ADMINLOGIN] Authenticating admin user: {username}")
-                user = auth.authenticate(username=username, password=password)
-
-                if user is not None and user.is_superuser:
-                    print(f"[ADMINLOGIN] Admin authentication successful for: {username}")
-                    auth.login(request, user)
-                    messages.success(request, f'Welcome Admin, {username}!')
-                    return HttpResponseRedirect('/adminhome')
-                elif user is not None:
-                    print(f"[ADMINLOGIN] User authenticated but not admin: {username}")
-                    messages.info(request, 'User authenticated but not an admin')
-                    return render(request, 'adminlogin.html')
-                else:
-                    print(f"[ADMINLOGIN] Authentication failed for: {username}")
-                    messages.info(request, 'Invalid credentials')
-                    return render(request, 'adminlogin.html')
-            except Exception as e:
-                print(f"[ADMINLOGIN] Error during authentication: {str(e)}")
-                print(traceback.format_exc())
-                messages.error(request, f'Authentication error: {str(e)}')
-                return render(request, 'adminlogin.html')
-        except Exception as e:
-            print(f"[ADMINLOGIN] CRITICAL ERROR: {str(e)}")
-            print(traceback.format_exc())
-            messages.error(request, 'An error occurred during admin login')
-            return render(request, 'adminlogin.html')
-    else:
+    if request.method != 'POST':
         return render(request, 'adminlogin.html')
+    username = request.POST.get('username', '').strip()
+    password = request.POST.get('password', '')
+    if not username or not password:
+        messages.error(request, 'Username and password are required')
+        return render(request, 'adminlogin.html')
+    limited = _rate_limited_login(request, username, 'adminlogin.html')
+    if limited:
+        return limited
+    try:
+        user = auth.authenticate(request, username=username, password=password)
+    except Exception as exc:
+        logger.error("[ADMINLOGIN] authentication backend error: %s", type(exc).__name__)
+        messages.error(request, _GENERIC_ERROR)
+        return render(request, 'adminlogin.html')
+    if user is None or not user.is_superuser:
+        # Same message for wrong credentials and non-admin accounts.
+        _record_login_failure(username)
+        messages.info(request, 'Invalid administrator credentials')
+        return render(request, 'adminlogin.html')
+    auth.login(request, user)
+    messages.success(request, f'Welcome Admin, {user.username}!')
+    return HttpResponseRedirect('/adminhome')
+
 
 def adminhome(request):
-    try:
-        if request.user.is_superuser:
-            data = MaliciousBot.objects.all()
-            return render(request, 'adminhome.html', {'data': data})
-        else:
-            return HttpResponseRedirect('/adminlogin')
-    except Exception as e:
-        print(f"Adminhome error: {str(e)}")
-        messages.error(request, 'An error occurred accessing admin home')
+    """
+    Administrator dashboard: read-only, tenant-aware overview.
+
+    Iterates the active tenants in user_database_registry (core DB) and reads
+    each tenant's recent history rows through an explicit connection alias
+    (no provisioning, no writes). Only superusers may access it.
+    """
+    if not (request.user.is_authenticated and request.user.is_superuser):
         return HttpResponseRedirect('/adminlogin')
 
-def predict(request):
-    if request.method == 'POST':
+    from User.models import UserDatabaseRegistry
+    from User.security.tenancy import resolve_existing_tenant_alias
+
+    per_tenant_limit = 50
+    rows = []
+    tenants = []
+    try:
+        registries = list(UserDatabaseRegistry.objects.using('default').filter(status='active').order_by('user_id')[:200])
+    except Exception as exc:
+        logger.error("[ADMIN] registry lookup failed: %s", type(exc).__name__)
+        registries = []
+        messages.error(request, 'Could not load the tenant registry')
+
+    for reg in registries:
+        tenant_id = f"user:{reg.user_id}"
         try:
-            print(f"[PREDICT] Starting POST request")
-            
-            # Get and validate URL
-            try:
-                url = request.POST.get('url', '').strip()
-                user = request.user
-                print(f"[PREDICT] URL received: {url}, User: {user}")
-            except Exception as e:
-                print(f"[PREDICT] Error getting form data: {str(e)}")
-                print(traceback.format_exc())
-                return render(request, 'predict.html')
+            alias = resolve_existing_tenant_alias(tenant_id)
+            if alias is None:
+                continue
+            entries = list(MaliciousBot.objects.using(alias).order_by('-timestamp')[:per_tenant_limit])
+        except Exception as exc:
+            logger.warning("[ADMIN] tenant %s unavailable: %s", reg.user_id, type(exc).__name__)
+            tenants.append({'username': reg.username, 'database': reg.database_name, 'count': None})
+            continue
+        tenants.append({'username': reg.username, 'database': reg.database_name, 'count': len(entries)})
+        for entry in entries:
+            rows.append({
+                'id': entry.id,
+                'tenant': reg.username,
+                'url': entry.url,
+                'prediction_type': entry.prediction_type,
+                'confidence': entry.confidence,
+                'timestamp': entry.timestamp,
+            })
+    rows = sorted(rows, key=lambda r: r['timestamp'].timestamp() if r['timestamp'] else 0, reverse=True)
+    return render(request, 'adminhome.html', {'data': rows, 'tenants': tenants})
 
-            # Validate URL input
-            if not url:
-                print(f"[PREDICT] URL is empty")
-                messages.error(request, 'URL cannot be empty')
-                return render(request, 'predict.html')
 
-            if not user.is_authenticated:
-                print(f"[PREDICT] User not authenticated")
-                messages.error(request, 'You must be logged in to make predictions')
-                return HttpResponseRedirect('/login')
-
-            prediction_result = None
-            prediction_type = None
-            confidence = None
-
-            if not ML_AVAILABLE:
-                # Mock response for local development
-                print(f"[PREDICT] ML not available - using mock response")
-                messages.warning(request, 'Running in mock mode - ML dependencies not available')
-                prediction_result = "Mock prediction: URL appears safe (ML not available)"
-                prediction_type = "Safe"
-                confidence = "N/A"
-                return render(request, 'predict.html', {
-                    'prediction': prediction_result,
-                    'url': url,
-                    'prediction_type': prediction_type,
-                    'is_confident': True,
-                    'confidence': confidence
-                })
-            else:
-                # Lazy train model on first prediction if not already trained
-                if not model_trained:
-                    print(f"[PREDICT] Training model on first prediction request...")
-                    messages.info(request, 'Training model on first request... Please wait.')
-                    if not train_model():
-                        print(f"[PREDICT] Model training failed")
-                        messages.error(request, 'Failed to train prediction model')
-                        return render(request, 'predict.html')
-                    print(f"[PREDICT] Model trained successfully")
-
-                from User.models import Domain, URL, Scan, Prediction
-                from User.services import get_confidence_threshold
-                from User.services.ml_service import MLPredictionService
-                from User.services.fallback_service import FallbackIntegrationService
-                from User.services.nikhil.nikhil_service import NikhilService
-
-                # 1. Normalize Domain and URL in database
-                pri_domain = extract_root_domain(url)
-                domain_obj, _ = Domain.objects.get_or_create(
-                    domain_name=str(pri_domain),
-                    defaults={'tld': os.path.splitext(str(pri_domain))[1] or None}
-                )
-                url_obj, _ = URL.objects.get_or_create(
-                    url=url,
-                    defaults={'domain': domain_obj, 'source': 'USER_SCAN'}
-                )
-
-                # 2. Create Scan record
-                scan = MLPredictionService.create_scan_record(url_obj, user=user if user.is_authenticated else None)
-
-                # 3. Make ML prediction using PARI MLPredictionService
-                pred_data = MLPredictionService.make_prediction(pipeline, url, scan)
-                initial_prediction = pred_data['predicted_class']
-                initial_confidence_float = pred_data['confidence']
-                initial_confidence_str = f"{initial_confidence_float * 100:.2f}%"
-                is_confident = pred_data['is_confident']
-                threshold = get_confidence_threshold()
-
-                print(f"[PREDICT] Scan {scan.id} prediction: {initial_prediction}, Confidence: {initial_confidence_str}, Threshold: {threshold:.2f}, Confident: {is_confident}")
-
-                context = {
-                    'url': url,
-                    'scan_id': scan.id,
-                }
-
-                # 4. Check confidence threshold
-                if is_confident:
-                    # CONFIDENT CASE (confidence >= 0.75)
-                    print(f"[PREDICT] Scan {scan.id} is CONFIDENT - directly storing structured result")
-                    prediction_result = f"URL classified as: {initial_prediction} (Confidence: {initial_confidence_str})"
-                    prediction_type = initial_prediction
-                    messages.success(request, f'Prediction completed: {initial_prediction} ({initial_confidence_str})')
-
-                    # Save to MaliciousBot table for prediction history
-                    try:
-                        MaliciousBot.objects.create(
-                            user=user if user.is_authenticated else None,
-                            url=url,
-                            prediction=prediction_result,
-                            prediction_type=initial_prediction,
-                            confidence=initial_confidence_str
-                        )
-                    except Exception as e:
-                        print(f"[PREDICT] MaliciousBot save error: {e}")
-
-                    context.update({
-                        'is_confident': True,
-                        'status': 'CONFIDENT',
-                        'prediction': prediction_result,
-                        'prediction_type': initial_prediction,
-                        'confidence': initial_confidence_str,
-                        'model_name': 'RandomForest'
-                    })
-
-                else:
-                    # UNCERTAIN CASE (confidence < 0.75) - Route to Nikhil fallback
-                    print(f"[PREDICT] Scan {scan.id} is UNCERTAIN ({initial_confidence_str} < {threshold:.2%}) - Routing to Nikhil fallback")
-                    
-                    # Invoke Nikhil deep analysis
-                    nikhil_svc = NikhilService()
-                    analysis_result = nikhil_svc.analyze_uncertain_url({
-                        'scan_id': scan.id,
-                        'url': url,
-                        'initial_prediction': initial_prediction,
-                        'initial_confidence': initial_confidence_float,
-                        'scan_status': 'UNCERTAIN',
-                        'pari_features': pred_data.get('pari_features')
-                    })
-
-                    # Process fallback result in SQL database
-                    fallback_processed = FallbackIntegrationService.process_fallback_result(analysis_result)
-                    print(f"[PREDICT] Fallback processing result: {fallback_processed}")
-
-                    final_classification = analysis_result.get('final_classification', 'Unknown')
-                    risk_level = analysis_result.get('risk_level', 'MEDIUM')
-                    risk_score = analysis_result.get('risk_score', 0.5)
-                    evidence_summary = analysis_result.get('evidence_summary', '')
-                    threat_indicators = analysis_result.get('threat_indicators', [])
-                    mongo_ref = analysis_result.get('mongo_document_reference')
-                    corroboration = analysis_result.get('corroboration', {})
-                    module_statuses = analysis_result.get('module_statuses', {})
-                    evidence_breakdown = analysis_result.get('evidence_breakdown', {})
-                    ai_display = analysis_result.get('ai_display', {})
-                    visual_snapshot = (
-                        analysis_result.get('evidence_data', {})
-                        .get('visual', {})
-                        .get('screenshot_reference')
-                    )
-
-                    prediction_result = f"Deep Analysis Result: {final_classification} (Risk: {risk_level}, Score: {risk_score:.2f})"
-                    prediction_type = final_classification
-                    messages.info(request, f'Deep analysis complete: {final_classification} (Initial: {initial_prediction} @ {initial_confidence_str})')
-
-                    # Save to MaliciousBot table for prediction history
-                    try:
-                        MaliciousBot.objects.create(
-                            user=user if user.is_authenticated else None,
-                            url=url,
-                            prediction=f"Initial: {initial_prediction} ({initial_confidence_str}) → Fallback: {final_classification} (Risk: {risk_level}, Score: {risk_score:.2f})",
-                            prediction_type=final_classification,
-                            confidence=f"Initial: {initial_confidence_str}, Risk: {risk_level}"
-                        )
-                    except Exception as e:
-                        print(f"[PREDICT] MaliciousBot save error: {e}")
-
-                    context.update({
-                        'is_confident': False,
-                        'status': 'UNCERTAIN',
-                        'fallback_invoked': True,
-                        'initial_prediction': initial_prediction,
-                        'initial_confidence': initial_confidence_str,
-                        'final_classification': final_classification,
-                        'risk_level': risk_level,
-                        'risk_score': f"{risk_score:.2f}",
-                        'evidence_summary': evidence_summary,
-                        'threat_indicators': threat_indicators,
-                        'mongo_ref': mongo_ref,
-                        'corroboration': corroboration,
-                        'module_statuses': module_statuses,
-                        'evidence_breakdown': evidence_breakdown,
-                        'ai_display': ai_display,
-                        'visual_snapshot': visual_snapshot,
-                        'threat_intel_display': analysis_result.get('threat_intel_display', {}),
-                        'prediction': prediction_result,
-                        'prediction_type': final_classification,
-                        'confidence': f"Initial: {initial_confidence_str} (Below {threshold * 100:.0f}% threshold)"
-                    })
-
-                return render(request, 'predict.html', context)
-
-        except Exception as e:
-            error_msg = f"Critical error in predict: {str(e)}"
-            print(f"[PREDICT] CRITICAL ERROR: {error_msg}")
-            print(traceback.format_exc())
-            messages.error(request, error_msg)
-            return render(request, 'predict.html', {'error': error_msg})
-
-    else:
+def predict(request):
+    if request.method != 'POST':
         return render(request, 'predict.html')
+
+    url = request.POST.get('url', '').strip()
+    user = request.user
+    if not user.is_authenticated:
+        messages.error(request, 'You must be logged in to make predictions')
+        return HttpResponseRedirect('/login')
+
+    error = _validate_submitted_url(url)
+    if error:
+        messages.error(request, error)
+        response = render(request, 'predict.html', {'url': url[:URL_MAX_LENGTH]})
+        response.status_code = 400
+        return response
+
+    from User.security import ratelimit
+    allowed, retry_after = ratelimit.hit('scan', f"user:{user.id}")
+    if not allowed:
+        return _too_many_requests(request, 'predict.html', 'Scan rate limit reached. Please wait before submitting more URLs.',
+                                  retry_after)
+
+    if not ML_AVAILABLE:
+        # Truthful status: no fabricated "Safe" result when the ML engine is missing.
+        logger.error("[PREDICT] ML dependencies unavailable; scan not performed")
+        messages.error(request, 'The ML analysis engine is unavailable on this server. No classification was produced.')
+        response = render(request, 'predict.html', {'url': url, 'error': 'ML engine unavailable'})
+        response.status_code = 503
+        return response
+
+    if not model_trained:
+        messages.info(request, 'Training model on first request... Please wait.')
+        if not train_model():
+            logger.error("[PREDICT] model training failed")
+            messages.error(request, 'Failed to train prediction model')
+            response = render(request, 'predict.html', {'url': url})
+            response.status_code = 503
+            return response
+
+    from User.models import Domain, URL
+    from User.services import get_confidence_threshold
+    from User.services.domain_normalization import normalize_url
+    from User.services.fallback_service import FallbackIntegrationService
+    from User.services.ml_service import MLPredictionService
+    from User.services.nikhil.nikhil_service import NikhilService
+    from User.security.tenancy import tenant_id_for_alias
+
+    alias = getattr(request, 'user_db', None) or 'guest_db'
+    tenant_id = getattr(request, 'tenant_id', None) or tenant_id_for_alias(alias)
+    scan = None
+    try:
+        # 1. Normalize Domain and URL (registered-domain storage, public suffix in tld)
+        norm = normalize_url(url)
+        domain_obj, _ = Domain.objects.using(alias).get_or_create(
+            domain_name=norm.registered_domain[:255],
+            defaults={'tld': (norm.suffix or None) and norm.suffix[:63]},
+        )
+        if norm.suffix and not domain_obj.tld:
+            Domain.objects.using(alias).filter(id=domain_obj.id).update(tld=norm.suffix[:63])
+        url_obj, _ = URL.objects.using(alias).get_or_create(
+            url=url, defaults={'domain': domain_obj, 'source': 'USER_SCAN'})
+        if url_obj.domain_id is None:
+            URL.objects.using(alias).filter(id=url_obj.id).update(domain=domain_obj)
+
+        # 2. Scan record + 3. PARI prediction (atomic on the tenant DB)
+        scan = MLPredictionService.create_scan_record(url_obj, user=user, db=alias)
+        pred_data = MLPredictionService.make_prediction(pipeline, url, scan, db=alias)
+        initial_prediction = pred_data['predicted_class']
+        initial_confidence_float = pred_data['confidence']
+        initial_confidence_str = f"{initial_confidence_float * 100:.2f}%"
+        is_confident = pred_data['is_confident']
+        threshold = get_confidence_threshold()
+        logger.info("[PREDICT] scan %s: %s @ %s (threshold %.2f, confident=%s)",
+                    scan.id, initial_prediction, initial_confidence_str, threshold, is_confident)
+
+        context = {'url': url, 'scan_id': scan.id}
+
+        if is_confident:
+            prediction_result = f"URL classified as: {initial_prediction} (Confidence: {initial_confidence_str})"
+            messages.success(request, f'Prediction completed: {initial_prediction} ({initial_confidence_str})')
+            MaliciousBot.objects.using(alias).create(
+                user=user, url=url, scan=scan, prediction=prediction_result,
+                prediction_type=initial_prediction, confidence=initial_confidence_str)
+            context.update({
+                'is_confident': True,
+                'status': 'CONFIDENT',
+                'prediction': prediction_result,
+                'prediction_type': initial_prediction,
+                'confidence': initial_confidence_str,
+                'model_name': 'RandomForest',
+            })
+            return render(request, 'predict.html', context)
+
+        # UNCERTAIN -> Nikhil fallback (explicit tenant identity everywhere)
+        FallbackIntegrationService.mark_deep_analysis_started(scan, db=alias)
+        try:
+            analysis_result = NikhilService().analyze_uncertain_url({
+                'scan_id': scan.id,
+                'url': url,
+                'initial_prediction': initial_prediction,
+                'initial_confidence': initial_confidence_float,
+                'scan_status': 'DEEP_ANALYSIS',
+                'pari_features': pred_data.get('pari_features'),
+                'db_alias': alias,
+                'tenant_id': tenant_id,
+                'investigation_id': str(scan.investigation_id),
+            })
+        except Exception as exc:
+            logger.error("[PREDICT] deep analysis failed for scan %s: %s", scan.id, type(exc).__name__)
+            FallbackIntegrationService.mark_scan_failed(scan.id, f"Deep analysis failed: {type(exc).__name__}", db=alias)
+            messages.error(request, 'Deep analysis could not be completed. The initial ML prediction was preserved.')
+            context.update({'is_confident': False, 'status': 'FAILED', 'initial_prediction': initial_prediction,
+                            'initial_confidence': initial_confidence_str, 'error': 'Deep analysis failed'})
+            return render(request, 'predict.html', context)
+
+        fallback_processed = FallbackIntegrationService.process_fallback_result(
+            analysis_result, db_alias=alias, tenant_id=tenant_id)
+        if not fallback_processed.get('success'):
+            logger.error("[PREDICT] fallback persistence failed for scan %s: %s", scan.id,
+                         fallback_processed.get('errors'))
+            FallbackIntegrationService.mark_scan_failed(
+                scan.id, (fallback_processed.get('errors') or ['Fallback persistence failed'])[0], db=alias)
+            messages.error(request, 'The deep-analysis result could not be saved; the scan is marked as failed.')
+
+        final_classification = analysis_result.get('final_classification', 'Unknown')
+        risk_level = analysis_result.get('risk_level', 'MEDIUM')
+        risk_score = analysis_result.get('risk_score', 0.5)
+        visual_snapshot = (analysis_result.get('evidence_data', {}).get('visual', {}) or {}).get('screenshot_reference')
+
+        prediction_result = f"Deep Analysis Result: {final_classification} (Risk: {risk_level}, Score: {risk_score:.2f})"
+        if fallback_processed.get('success'):
+            messages.info(request, f'Deep analysis complete: {final_classification} '
+                                   f'(Initial: {initial_prediction} @ {initial_confidence_str})')
+            MaliciousBot.objects.using(alias).create(
+                user=user, url=url, scan=scan,
+                prediction=f"Initial: {initial_prediction} ({initial_confidence_str}) → Fallback: {final_classification} "
+                           f"(Risk: {risk_level}, Score: {risk_score:.2f})",
+                prediction_type=final_classification,
+                confidence=f"Initial: {initial_confidence_str}, Risk: {risk_level}")
+
+        context.update({
+            'is_confident': False,
+            'status': 'COMPLETED' if fallback_processed.get('success') else 'FAILED',
+            'fallback_invoked': True,
+            'initial_prediction': initial_prediction,
+            'initial_confidence': initial_confidence_str,
+            'final_classification': final_classification,
+            'risk_level': risk_level,
+            'risk_score': f"{risk_score:.2f}",
+            'evidence_summary': analysis_result.get('evidence_summary', ''),
+            'threat_indicators': analysis_result.get('threat_indicators', []),
+            'mongo_ref': analysis_result.get('mongo_document_reference'),
+            'forensic_status': analysis_result.get('forensic_status'),
+            'corroboration': analysis_result.get('corroboration', {}),
+            'module_statuses': analysis_result.get('module_statuses', {}),
+            'evidence_breakdown': analysis_result.get('evidence_breakdown', {}),
+            'ai_display': analysis_result.get('ai_display', {}),
+            'visual_snapshot': visual_snapshot,
+            'threat_intel_display': analysis_result.get('threat_intel_display', {}),
+            'prediction': prediction_result,
+            'prediction_type': final_classification,
+            'confidence': f"Initial: {initial_confidence_str} (Below {threshold * 100:.0f}% threshold)",
+        })
+        return render(request, 'predict.html', context)
+
+    except Exception as exc:
+        logger.error("[PREDICT] unexpected failure: %s", type(exc).__name__)
+        if scan is not None:
+            FallbackIntegrationService.mark_scan_failed(scan.id, f"Unexpected failure: {type(exc).__name__}", db=alias)
+        messages.error(request, _GENERIC_ERROR)
+        response = render(request, 'predict.html', {'error': 'Scan failed'})
+        response.status_code = 500
+        return response
+
+
+def _threat_intel_badges(evidence_doc):
+    ti_doc = (evidence_doc or {}).get('threat_intelligence') or {}
+    sources = ti_doc.get('sources', {}) or {}
+    local_sql = sources.get('local_sql', {}) or {}
+    trusted = sources.get('trusted_domain', {}) or {}
+    malicious = local_sql.get('known_malicious_in_domain', 0) or 0
+    return {
+        'threatfox': (sources.get('threatfox', {}) or {}).get('status', 'NO_MATCH'),
+        'urlhaus': (sources.get('urlhaus', {}) or {}).get('status', 'NO_MATCH'),
+        'abuseipdb': f"{(sources.get('abuseipdb', {}) or {}).get('abuse_confidence_score', 0)}% abuse confidence",
+        'local_sql': f"{malicious} historical malicious" if malicious > 0 else "No historical indicator",
+        'trusted_domain': trusted.get('category') or ("Verified" if trusted.get('is_known') else "Not Listed"),
+    }
+
 
 def data(request):
     if not request.user.is_authenticated:
         messages.warning(request, 'Please log in to view your predictions')
         return HttpResponseRedirect('/login')
 
+    from User.models import HistoryClearEvent
+    from User.security.tenancy import tenant_id_for_alias
+    from User.services.fallback_service import FallbackIntegrationService
+
+    alias = getattr(request, 'user_db', None) or 'guest_db'
+    tenant_id = getattr(request, 'tenant_id', None) or tenant_id_for_alias(alias)
+
+    # Recover scans interrupted by worker restarts/timeouts so they never stay pending.
     try:
-        if not ML_AVAILABLE:
-            # Mock data for local development
-            messages.info(request, 'Displaying mock data - ML not fully available')
-            mock_data = [
-                {'url': 'https://example.com', 'prediction': 'Mock: Benign', 'prediction_type': 'Benign', 'confidence': 'N/A', 'timestamp': '2024-01-01'},
-                {'url': 'http://suspicious-site.ru', 'prediction': 'Mock: Phishing', 'prediction_type': 'Phishing', 'confidence': 'N/A', 'timestamp': '2024-01-02'},
-            ]
-            return render(request, 'data.html', {'data': mock_data})
+        FallbackIntegrationService.recover_stale_scans(db=alias)
+    except Exception as exc:
+        logger.warning("[HISTORY] stale-scan recovery skipped: %s", type(exc).__name__)
 
-        try:
-            from User.models import HistoryClearEvent
-            latest_clear = HistoryClearEvent.objects.order_by('-cleared_at').first()
-            user_data = MaliciousBot.objects.all().order_by('-timestamp')
-            if latest_clear:
-                user_data = user_data.filter(timestamp__gt=latest_clear.cleared_at)
+    try:
+        latest_clear = HistoryClearEvent.objects.using(alias).order_by('-cleared_at').first()
+        history = MaliciousBot.objects.using(alias).select_related('scan').order_by('-timestamp')
+        if latest_clear:
+            history = history.filter(timestamp__gt=latest_clear.cleared_at)
+    except Exception as exc:
+        logger.error("[HISTORY] history query failed: %s", type(exc).__name__)
+        messages.error(request, 'Could not load prediction history')
+        return render(request, 'data.html', {'data': [], 'error': 'history unavailable'})
 
-            data_list = []
+    data_list = []
+    mongo_repo = None
+    for item in history:
+        ti_info = None
+        scan = item.scan  # exact scan that produced this row (NULL for legacy rows)
+        if scan is not None and scan.fallback_model:
+            try:
+                if mongo_repo is None:
+                    from User.services.nikhil.mongodb_repository import MongoDBRepository
+                    mongo_repo = MongoDBRepository()
+                ti_info = _threat_intel_badges(mongo_repo.get_evidence(scan.id, tenant_id=tenant_id))
+            except Exception as exc:
+                # Evidence lookup problems never hide the history row itself.
+                logger.debug("[HISTORY] TI details unavailable for history row %s: %s", item.id, type(exc).__name__)
+                ti_info = None
+        data_list.append({
+            'id': item.id,
+            'url': item.url,
+            'prediction': item.prediction,
+            'prediction_type': item.prediction_type,
+            'confidence': item.confidence,
+            'timestamp': item.timestamp.strftime('%Y-%m-%d %H:%M:%S') if item.timestamp else 'N/A',
+            'threat_intel': ti_info,
+            'scan_status': scan.status if scan is not None else None,
+            'forensic_status': scan.forensic_status if scan is not None else None,
+        })
 
-            mongo_repo = None
-            for item in user_data:
-                try:
-                    ti_info = None
-                    if item.prediction and ('Fallback' in item.prediction or 'Deep Analysis' in item.prediction):
-                        try:
-                            from User.models import Scan
-                            scan = Scan.objects.filter(url__url=item.url).order_by('-id').first()
-                            if scan:
-                                if mongo_repo is None:
-                                    from User.services.nikhil.mongodb_repository import MongoDBRepository
-                                    mongo_repo = MongoDBRepository()
-                                evidence_doc = mongo_repo.get_evidence(scan.id)
-                                if evidence_doc and 'threat_intelligence' in evidence_doc:
-                                    ti_doc = evidence_doc['threat_intelligence']
-                                    sources = ti_doc.get('sources', {})
-                                    ti_info = {
-                                        'threatfox': sources.get('threatfox', {}).get('status', 'NO_MATCH'),
-                                        'urlhaus': sources.get('urlhaus', {}).get('status', 'NO_MATCH'),
-                                        'abuseipdb': f"{sources.get('abuseipdb', {}).get('abuse_confidence_score', 0)}% abuse confidence",
-                                        'local_sql': f"{sources.get('local_sql', {}).get('known_malicious_in_domain', 0)} historical malicious" if sources.get('local_sql', {}).get('known_malicious_in_domain', 0) > 0 else "No historical indicator",
-                                        'trusted_domain': sources.get('trusted_domain', {}).get('category') or ("Verified" if sources.get('trusted_domain', {}).get('is_known') else "Not Listed")
-                                    }
-                        except Exception as e:
-                            logger.debug(f"Could not load TI history details for {item.url}: {e}")
+    if not data_list:
+        messages.info(request, 'No prediction history found. Make a prediction to get started!')
+    return render(request, 'data.html', {'data': data_list})
 
-                    data_list.append({
-                        'id': item.id,
-                        'url': item.url,
-                        'prediction': item.prediction,
-                        'prediction_type': item.prediction_type,
-                        'confidence': item.confidence,
-                        'timestamp': item.timestamp.strftime('%Y-%m-%d %H:%M:%S') if item.timestamp else 'N/A',
-                        'threat_intel': ti_info
-                    })
-                except Exception as e:
-                    print(f"Error processing data item: {str(e)}")
-                    continue
 
-            if not data_list:
-                messages.info(request, 'No prediction history found. Make a prediction to get started!')
-
-            return render(request, 'data.html', {'data': data_list})
-
-        except Exception as e:
-            error_msg = f"Error retrieving prediction history: {str(e)}"
-            print(error_msg)
-            messages.error(request, error_msg)
-            return render(request, 'data.html', {'data': [], 'error': error_msg})
-
-    except Exception as e:
-        error_msg = f"Critical error in data view: {str(e)}"
-        print(error_msg)
-        messages.error(request, error_msg)
-        return render(request, 'data.html', {'error': error_msg})
-
+@require_POST
 def clear_history(request):
     """
     Non-destructive history visibility reset.
     Does NOT delete any record from MySQL or MongoDB.
-    Inserts a HistoryClearEvent timestamp so older scans are hidden from the UI.
     """
     if not request.user.is_authenticated:
         messages.warning(request, 'Please log in to clear history view')
         return HttpResponseRedirect('/login')
-        
-    if request.method == 'POST':
-        from django.utils import timezone
-        from User.models import HistoryClearEvent
-        HistoryClearEvent.objects.create(
-            user_id=request.user.id,
-            cleared_at=timezone.now()
-        )
-        messages.info(request, "History cleared from view. Your records remain stored securely.")
-        return HttpResponseRedirect('/data')
+    from django.utils import timezone
+    from User.models import HistoryClearEvent
+    alias = getattr(request, 'user_db', None) or 'guest_db'
+    HistoryClearEvent.objects.using(alias).create(user_id=request.user.id, cleared_at=timezone.now())
+    messages.info(request, "History cleared from view. Your records remain stored securely.")
     return HttpResponseRedirect('/data')
 
-def logout(request):
 
+@require_POST
+def logout(request):
     auth.logout(request)
     return HttpResponseRedirect('/')
 
-def health(request):
-    """Health check endpoint for monitoring.
 
-    Confirms that the Django application is running and that the core
-    (maliciousbot_core) database connection is available. Deliberately cheap:
-    it never trains a model and never triggers fallback/analysis work.
-    Returns 503 when the core database cannot be reached.
-    """
+def health(request):
+    """Public liveness/readiness probe: core DB reachability only (no details)."""
     from django.db import connection
 
     try:
@@ -852,11 +843,10 @@ def health(request):
             cursor.execute("SELECT 1")
             cursor.fetchone()
     except Exception as e:
-        db_message = str(e)
-        print(f"Health check - Database error: {db_message}")
+        logger.error("Health check - core database error: %s", type(e).__name__)
         return JsonResponse({
             'status': 'error',
-            'message': f'Database error: {db_message}',
+            'message': 'Database unavailable',
             'database': connection.settings_dict.get('ENGINE', 'unknown'),
         }, status=503)
 
@@ -866,111 +856,67 @@ def health(request):
         'database': connection.settings_dict.get('ENGINE', 'unknown'),
     })
 
+
 def status(request):
-    """Comprehensive status endpoint with detailed diagnostics"""
+    """
+    Status endpoint. Anonymous / non-staff callers get only an overall status;
+    detailed diagnostics (counts, platform, ML state, resources) require a
+    staff account. Exception details are never returned.
+    """
+    from django.db import connection
+
+    db_status = "OK"
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1")
+    except Exception as e:
+        db_status = "ERROR"
+        logger.error("Status endpoint - core database error: %s", type(e).__name__)
+
+    overall = "operational" if db_status == "OK" else "degraded"
+    payload = {"status": overall, "timestamp": str(datetime.now()), "database": {"status": db_status}}
+
+    if not (request.user.is_authenticated and request.user.is_staff):
+        return JsonResponse(payload)
+
     try:
         import platform
         import sys
-        
-        # Database status
-        db_status = "OK"
-        db_user_count = 0
-        db_prediction_count = 0
-        db_message = ""
-
-        try:
-            from django.db import connection
-            with connection.cursor() as cursor:
-                cursor.execute("SELECT 1")
-            db_user_count = User.objects.count()
-            db_prediction_count = MaliciousBot.objects.count()
-            db_message = "Database operational"
-        except Exception as e:
-            db_status = "ERROR"
-            db_message = str(e)
-            print(f"Status endpoint - Database error: {db_message}")
-
-        # System information
+        if db_status == "OK":
+            try:
+                payload["database"]["users"] = User.objects.count()
+                payload["database"]["predictions"] = MaliciousBot.objects.count()
+            except Exception as e:
+                logger.error("Status endpoint - count query failed: %s", type(e).__name__)
         try:
             import psutil
             memory_info = psutil.virtual_memory()
-            cpu_percent = psutil.cpu_percent(interval=0.1)
-            memory_percent = memory_info.percent
-            memory_available_mb = memory_info.available / (1024 * 1024)
+            resources = {
+                "cpu_usage_percent": psutil.cpu_percent(interval=0.1),
+                "memory_usage_percent": memory_info.percent,
+                "memory_available_mb": f"{memory_info.available / (1024 * 1024):.2f}",
+            }
         except ImportError:
-            print("psutil not available - system metrics unavailable")
-            cpu_percent = "N/A (psutil not installed)"
-            memory_percent = "N/A (psutil not installed)"
-            memory_available_mb = "N/A (psutil not installed)"
-        except Exception as e:
-            print(f"System metrics error: {str(e)}")
-            cpu_percent = "N/A"
-            memory_percent = "N/A"
-            memory_available_mb = "N/A"
-
-        # Model status
-        try:
-            # Estimate model size
-            model_size_bytes = sys.getsizeof(pipeline) if pipeline else 0
-            model_size_mb = model_size_bytes / (1024 * 1024)
-        except Exception as e:
-            model_size_mb = "N/A"
-            print(f"Model size check error: {str(e)}")
-
-        # Build comprehensive response
-        response_data = {
-            "status": "operational" if db_status == "OK" else "degraded",
-            "timestamp": str(datetime.now()),
-            "environment": {
-                "platform": platform.system(),
-                "python_version": platform.python_version(),
-                "request_user": str(request.user) if request.user else "anonymous",
-                "is_authenticated": request.user.is_authenticated if request.user else False
-            },
-            "database": {
-                "status": db_status,
-                "message": db_message,
-                "users": db_user_count,
-                "predictions": db_prediction_count
-            },
-            "system_resources": {
-                "cpu_usage_percent": cpu_percent,
-                "memory_usage_percent": memory_percent,
-                "memory_available_mb": memory_available_mb if isinstance(memory_available_mb, str) else f"{memory_available_mb:.2f}"
-            },
+            resources = {"cpu_usage_percent": "N/A (psutil not installed)",
+                         "memory_usage_percent": "N/A (psutil not installed)",
+                         "memory_available_mb": "N/A (psutil not installed)"}
+        payload.update({
+            "environment": {"platform": platform.system(), "python_version": platform.python_version()},
+            "system_resources": resources,
             "ml_system": {
                 "ml_available": ML_AVAILABLE,
                 "model_trained": model_trained,
-                "model_size_mb": model_size_mb if isinstance(model_size_mb, str) else f"{model_size_mb:.2f}",
-                "tldextract_available": TLDEXTRACT_AVAILABLE
+                "model_size_mb": f"{(sys.getsizeof(pipeline) if pipeline else 0) / (1024 * 1024):.2f}",
+                "tldextract_available": TLDEXTRACT_AVAILABLE,
             },
             "application": {
                 "version": "1.0.0",
                 "name": "MaliciousBot Phishing Detector",
-                "deployment": "Render.com" if os.environ.get('RENDER') else "Local"
+                "deployment": "Render.com" if os.environ.get('RENDER') else "Local",
             },
-            "endpoints_available": {
-                "index": "/",
-                "register": "/register",
-                "login": "/login",
-                "adminlogin": "/adminlogin",
-                "predict": "/predict",
-                "data": "/data",
-                "adminhome": "/adminhome",
-                "health": "/health",
-                "status": "/status",
-                "logout": "/logout"
-            }
-        }
-
-        print(f"Status check performed: Application operational, DB: {db_status}, ML: {ML_AVAILABLE}")
-        return JsonResponse(response_data)
-
+        })
+        return JsonResponse(payload)
     except Exception as e:
-        error_msg = f"Status endpoint error: {str(e)}"
-        print(error_msg)
-        return JsonResponse({
-            "status": "error",
-            "message": error_msg,
-            "timestamp": str(datetime.now())
-        }, status=500)
+        logger.error("Status endpoint error: %s", type(e).__name__)
+        return JsonResponse({"status": "error", "message": "Status unavailable",
+                             "timestamp": str(datetime.now())}, status=500)

@@ -57,7 +57,7 @@
                   <a class="nav-link" href="/adminhome">Home <span class="sr-only">(current)</span></a>
                 </li>
                   <li class="nav-item">
-                    <a class="nav-link" href="/logout"> Logout </a>
+                    <form method="post" action="/logout" class="d-inline">{% csrf_token %}<button type="submit" class="nav-link btn btn-link" style="border:0;background:none;cursor:pointer;"> Logout </button></form>
                   </li>
                 </ul>
               <form class="form-inline">
@@ -80,26 +80,37 @@
           Malicious Bot Detection
             </h2>
           </div>
+          {% if messages %}
+            {% for message in messages %}
+              <div class="alert alert-{% if message.tags == 'error' %}danger{% else %}info{% endif %}">{{ message }}</div>
+            {% endfor %}
+          {% endif %}
+          <p style="color:whitesmoke;">Tenants: {{ tenants|length }} &middot; Records shown: {{ data|length }} (latest 50 per tenant, read-only)</p>
           <table class="table">
             <thead class="thead-light">
               <tr>
                 <th scope="col">Id</th>
+                <th scope="col">User</th>
                 <th scope="col">URL</th>
-                <th scope="col">Malicious Bot</th>
-                
+                <th scope="col">Classification</th>
+                <th scope="col">Confidence / Risk</th>
+                <th scope="col">Timestamp</th>
               </tr>
             </thead>
-            {% for i in mb %}
-            <tbody style="color:whitesmoke;" >
+            <tbody style="color:whitesmoke;">
+            {% for i in data %}
               <tr>
-                <th scope="row">{{i.id}}</th>
-                <td>{{i.url}}</td>
-                <td>{{i.bot}}</td>
-               
-                
+                <th scope="row">{{ i.id }}</th>
+                <td>{{ i.tenant }}</td>
+                <td style="word-break:break-all;">{{ i.url }}</td>
+                <td>{{ i.prediction_type|default:'—' }}</td>
+                <td>{{ i.confidence|default:'—' }}</td>
+                <td style="white-space:nowrap;">{{ i.timestamp|date:'Y-m-d H:i:s' }}</td>
               </tr>
-              </tbody>
-              {% endfor%}
+            {% empty %}
+              <tr><td colspan="6">No scan records found.</td></tr>
+            {% endfor %}
+            </tbody>
           </table>
           
           

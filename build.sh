@@ -20,3 +20,7 @@ python manage.py migrate --noinput
 
 # Run migrations for guest_db
 python manage.py migrate --database=guest_db --noinput
+
+# Shared rate-limit cache table (no-op unless CACHE_BACKEND=database) and role groups
+python manage.py createcachetable
+python manage.py setup_roles

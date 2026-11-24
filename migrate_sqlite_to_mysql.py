@@ -1,25 +1,130 @@
+"""
+One-off SQLite -> MySQL multi-database migration (Phase 1: SAFE BY DEFAULT).
+
+This script can DROP MySQL databases. It now refuses to do anything
+destructive unless every safeguard is satisfied:
+
+  * Dry-run is the default: without --execute nothing connects to MySQL and
+    nothing is written; the plan is printed.
+  * Refuses to run when RENDER / PRODUCTION is set (production protection).
+  * Drops only databases named EXACTLY in --drop-database (repeatable). Wildcards
+    ('%', '_' patterns, '*', '?') are rejected and names must match
+    ^maliciousbot_[a-z0-9_]+$ . The old "SHOW DATABASES LIKE 'maliciousbot_%'"
+    wildcard drop has been removed.
+  * --execute additionally requires --backup-confirmed with --backup-path
+    pointing to an existing backup file, and --confirm MIGRATE-AND-DROP when any
+    database is to be dropped.
+
+Example (dry-run):
+    python migrate_sqlite_to_mysql.py
+Example (explicit, local only):
+    python migrate_sqlite_to_mysql.py --execute --backup-confirmed --backup-path backup.sql \
+        --drop-database maliciousbot_guest --confirm MIGRATE-AND-DROP
+"""
+import argparse
 import os
-import sys
+import re
 import sqlite3
-import MySQLdb
-import django
+import sys
 
-# Setup environment
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'MaliciousBot.settings')
-django.setup()
+CONFIRM_PHRASE = 'MIGRATE-AND-DROP'
+_DB_NAME_RE = re.compile(r'^maliciousbot_[a-z0-9_]+$')
+_WILDCARD_CHARS = set('%*?[]')
 
-from django.conf import settings
-from django.core.management import call_command
-from django.utils import timezone
-from User.db_manager import (
-    ensure_mysql_database_exists,
-    register_database_connection,
-    get_user_db_name,
-    get_mysql_server_config,
-)
-from User.models import UserDatabaseRegistry
 
-def run_migration():
+class MigrationSafetyError(RuntimeError):
+    pass
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description='SQLite -> MySQL migration (dry-run by default)')
+    parser.add_argument('--execute', action='store_true', help='Actually perform the migration')
+    parser.add_argument('--drop-database', action='append', default=[], metavar='NAME',
+                        help='Exact database name that may be dropped before re-creation (repeatable)')
+    parser.add_argument('--confirm', default='', help=f'Must equal {CONFIRM_PHRASE} when dropping databases')
+    parser.add_argument('--backup-confirmed', action='store_true', help='Confirm a verified backup exists')
+    parser.add_argument('--backup-path', default='', help='Path to the verified backup file')
+    return parser.parse_args(argv)
+
+
+def validate_drop_allowlist(names):
+    """Return the validated exact-name allowlist or raise MigrationSafetyError."""
+    clean = []
+    for name in names:
+        if any(ch in _WILDCARD_CHARS for ch in name):
+            raise MigrationSafetyError(f"wildcard characters are not allowed in database names: {name!r}")
+        if not _DB_NAME_RE.match(name):
+            raise MigrationSafetyError(f"database name not allowed: {name!r}")
+        if name not in clean:
+            clean.append(name)
+    return clean
+
+
+def plan_database_drops(existing, allowlist):
+    """Databases to drop = exact intersection of existing names and the allowlist."""
+    allowed = set(validate_drop_allowlist(allowlist))
+    return [name for name in existing if name in allowed]
+
+
+def assert_execution_allowed(args, environ=None):
+    """Raise MigrationSafetyError unless every safeguard for --execute holds."""
+    environ = os.environ if environ is None else environ
+    if environ.get('RENDER') or environ.get('PRODUCTION'):
+        raise MigrationSafetyError('refusing to run in a production environment (RENDER/PRODUCTION set)')
+    if not args.execute:
+        return False
+    if not args.backup_confirmed or not args.backup_path or not os.path.isfile(args.backup_path):
+        raise MigrationSafetyError('--execute requires --backup-confirmed and an existing --backup-path file')
+    allowlist = validate_drop_allowlist(args.drop_database)
+    if allowlist and args.confirm != CONFIRM_PHRASE:
+        raise MigrationSafetyError(f'dropping databases requires --confirm {CONFIRM_PHRASE}')
+    return True
+
+
+def _bootstrap_django():
+    """Import Django and project modules only when the migration really runs."""
+    import django
+    os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'MaliciousBot.settings')
+    django.setup()
+    import MySQLdb  # PyMySQL shim installed by MaliciousBot/__init__.py
+    from django.conf import settings
+    from django.core.management import call_command
+    from django.utils import timezone
+    from User.db_manager import (
+        ensure_mysql_database_exists, register_database_connection, get_user_db_name, get_mysql_server_config,
+    )
+    from User.models import UserDatabaseRegistry
+    globals().update({
+        'MySQLdb': MySQLdb, 'settings': settings, 'call_command': call_command, 'timezone': timezone,
+        'ensure_mysql_database_exists': ensure_mysql_database_exists,
+        'register_database_connection': register_database_connection,
+        'get_user_db_name': get_user_db_name, 'get_mysql_server_config': get_mysql_server_config,
+        'UserDatabaseRegistry': UserDatabaseRegistry,
+    })
+
+
+def print_plan(args):
+    print("=" * 70)
+    print("DRY-RUN: SQLite -> MySQL migration plan (no MySQL connection made)")
+    print("=" * 70)
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    sqlite_path = os.path.join(base_dir, 'db.sqlite3')
+    print(f"SQLite source: {sqlite_path} (exists={os.path.exists(sqlite_path)})")
+    try:
+        allowlist = validate_drop_allowlist(args.drop_database)
+    except MigrationSafetyError as exc:
+        print(f"INVALID drop allowlist: {exc}")
+        return 2
+    print(f"Databases that WOULD be dropped if present (exact names only): {allowlist or 'none'}")
+    print("Steps: create core/guest DBs if absent, migrate, copy auth_user/sessions, provision per-user DBs, "
+          "copy per-user rows, verify counts.")
+    print(f"To execute: --execute --backup-confirmed --backup-path <file>"
+          f"{' --confirm ' + CONFIRM_PHRASE if allowlist else ''}")
+    return 0
+
+
+def run_migration(args):
+
     print("=" * 70)
     print("DJANGO SQLITE -> MYSQL MULTI-DATABASE MIGRATION")
     print("=" * 70)
@@ -54,11 +159,13 @@ def run_migration():
     core_db = os.environ.get('MYSQL_CORE_DATABASE', 'maliciousbot_core')
     guest_db = 'maliciousbot_guest'
 
-    # Reset any partial previous databases
+    # Drop ONLY explicitly allow-listed, exactly named databases (no wildcards).
     conn_raw = MySQLdb.connect(host=cfg['HOST'], port=cfg['PORT'], user=cfg['USER'], passwd=cfg['PASSWORD'])
     cur_raw = conn_raw.cursor()
-    cur_raw.execute("SHOW DATABASES LIKE 'maliciousbot_%'")
-    for (dname,) in cur_raw.fetchall():
+    cur_raw.execute("SHOW DATABASES")
+    existing = [row[0] for row in cur_raw.fetchall()]
+    for dname in plan_database_drops(existing, args.drop_database):
+        print(f"  Dropping allow-listed database: {dname}")
         cur_raw.execute(f"DROP DATABASE `{dname}`")
     conn_raw.commit()
     conn_raw.close()
@@ -415,5 +522,19 @@ def run_migration():
     print("MIGRATION TO MYSQL COMPLETED SUCCESSFULLY!")
     print("=" * 70)
 
+def main(argv=None):
+    args = parse_args(argv)
+    try:
+        execute = assert_execution_allowed(args)
+    except MigrationSafetyError as exc:
+        print(f"REFUSED: {exc}")
+        return 2
+    if not execute:
+        return print_plan(args)
+    _bootstrap_django()
+    run_migration(args)
+    return 0
+
+
 if __name__ == '__main__':
-    run_migration()
+    sys.exit(main())

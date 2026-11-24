@@ -11,7 +11,8 @@ https://docs.djangoproject.com/en/3.0/ref/settings/
 """
 
 import os
-import dj_database_url
+
+from django.core.exceptions import ImproperlyConfigured
 
 from MaliciousBot.db_config import get_mysql_ssl_options, resolve_mysql_ssl_mode
 
@@ -36,10 +37,21 @@ def load_env_file(env_path):
 load_env_file(os.path.join(BASE_DIR, ".env"))
 
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.environ.get('SECRET_KEY', 'change-me-in-env')
-
 _TRUTHY = ('true', '1', 'yes', 'on')
+
+
+def env_bool(name, default):
+    value = os.environ.get(name)
+    if value is None or value.strip() == '':
+        return bool(default)
+    return value.strip().lower() in _TRUTHY
+
+
+def env_int(name, default):
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return int(default)
 
 
 def is_production_runtime():
@@ -108,6 +120,33 @@ def build_csrf_trusted_origins():
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = resolve_debug()
 
+_INSECURE_SECRET_KEYS = frozenset({'', 'change-me-in-env', 'changeme', 'secret', 'django-insecure'})
+_LOCAL_DEV_SECRET_KEY = 'django-insecure-local-development-only-do-not-use-in-production-7f3a9c'
+
+
+def resolve_secret_key():
+    """
+    Require a strong SECRET_KEY outside local DEBUG development.
+
+    Production (RENDER/PRODUCTION set) or DEBUG=False refuses to start with a
+    missing, placeholder or short key. Local DEBUG development falls back to a
+    clearly-labelled development-only key.
+    """
+    key = os.environ.get('SECRET_KEY', '').strip()
+    strong = key and key.lower() not in _INSECURE_SECRET_KEYS and len(key) >= 32
+    if strong:
+        return key
+    if is_production_runtime() or not DEBUG:
+        raise ImproperlyConfigured(
+            'SECRET_KEY must be set to a random value of at least 32 characters '
+            'in production (RENDER/PRODUCTION set) or when DEBUG is False.'
+        )
+    return _LOCAL_DEV_SECRET_KEY
+
+
+# SECURITY WARNING: keep the secret key used in production secret!
+SECRET_KEY = resolve_secret_key()
+
 ALLOWED_HOSTS = build_allowed_hosts()
 CSRF_TRUSTED_ORIGINS = build_csrf_trusted_origins()
 
@@ -126,6 +165,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'User.security.headers.SecurityHeadersMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -265,3 +305,75 @@ WHITENOISE_USE_FINDERS = True
 
 
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 security hardening
+# ---------------------------------------------------------------------------
+_secure_cookie_default = not DEBUG
+SESSION_COOKIE_SECURE = env_bool('SESSION_COOKIE_SECURE', _secure_cookie_default)
+CSRF_COOKIE_SECURE = env_bool('CSRF_COOKIE_SECURE', _secure_cookie_default)
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = 'Lax'
+CSRF_COOKIE_SAMESITE = 'Lax'
+SESSION_COOKIE_AGE = env_int('SESSION_COOKIE_AGE', 43200)  # 12 hours
+
+# Render terminates TLS at its proxy and forwards X-Forwarded-Proto.
+SECURE_SSL_REDIRECT = env_bool('SECURE_SSL_REDIRECT', is_production_runtime())
+SECURE_REDIRECT_EXEMPT = [r'^health$']  # Render's internal health probe
+SECURE_HSTS_SECONDS = env_int('SECURE_HSTS_SECONDS', 86400 if is_production_runtime() else 0)
+SECURE_HSTS_INCLUDE_SUBDOMAINS = env_bool('SECURE_HSTS_INCLUDE_SUBDOMAINS', False)
+SECURE_HSTS_PRELOAD = env_bool('SECURE_HSTS_PRELOAD', False)
+SECURE_CONTENT_TYPE_NOSNIFF = True
+SECURE_REFERRER_POLICY = 'same-origin'
+SECURE_CROSS_ORIGIN_OPENER_POLICY = 'same-origin'
+X_FRAME_OPTIONS = 'DENY'
+
+if os.environ.get('CONTENT_SECURITY_POLICY') is not None:
+    CONTENT_SECURITY_POLICY = os.environ.get('CONTENT_SECURITY_POLICY', '')
+
+# Media (screenshots). Served only through the ownership-checked view.
+MEDIA_ROOT = os.environ.get('MEDIA_ROOT', os.path.join(BASE_DIR, 'media'))
+SCREENSHOT_MAX_BYTES = env_int('SCREENSHOT_MAX_BYTES', 5 * 1024 * 1024)
+VISUAL_ANALYSIS_ENABLED = env_bool('VISUAL_ANALYSIS_ENABLED', True)
+
+# Deep analysis wall-clock budget (must stay below the gunicorn worker timeout).
+NIKHIL_MAX_SECONDS = env_int('NIKHIL_MAX_SECONDS', 45)
+# Scans left UNCERTAIN/DEEP_ANALYSIS longer than this are recovered as FAILED.
+STALE_SCAN_MINUTES = env_int('STALE_SCAN_MINUTES', 15)
+
+# Cache (rate limiting). 'database' = Django DatabaseCache in the core DB,
+# shared by every worker (run `python manage.py createcachetable`).
+if os.environ.get('CACHE_BACKEND', '').strip().lower() == 'database':
+    CACHES = {'default': {
+        'BACKEND': 'django.core.cache.backends.db.DatabaseCache',
+        'LOCATION': 'maliciousbot_cache',
+    }}
+else:
+    CACHES = {'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+        'LOCATION': 'maliciousbot-local',
+    }}
+RATELIMIT_CACHE_ALIAS = 'default'
+RATE_LIMIT_ENABLED = env_bool('RATE_LIMIT_ENABLED', True)
+TRUSTED_PROXY_COUNT = env_int('TRUSTED_PROXY_COUNT', 1 if is_production_runtime() else 0)
+
+LOGIN_URL = '/login'
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'filters': {
+        'redact_secrets': {'()': 'User.security.redaction.RedactingFilter'},
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'filters': ['redact_secrets'],
+        },
+    },
+    'root': {
+        'handlers': ['console'],
+        'level': os.environ.get('LOG_LEVEL', 'INFO'),
+    },
+}

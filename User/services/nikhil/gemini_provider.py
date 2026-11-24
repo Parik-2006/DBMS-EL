@@ -7,6 +7,7 @@ import time
 import logging
 
 from User.services.nikhil.ai_provider_base import AIProviderBase
+from User.security.redaction import redact_text
 
 logger = logging.getLogger(__name__)
 
@@ -50,8 +51,9 @@ class GeminiProvider(AIProviderBase):
             import requests
 
             url = self.GEMINI_API_URL.format(model=self.model)
-            headers = {"Content-Type": "application/json"}
-            params = {"key": self.api_key}
+            # The API key travels in a header (never in the URL), so it cannot
+            # leak through request URLs embedded in exception messages or logs.
+            headers = {"Content-Type": "application/json", "x-goog-api-key": self.api_key}
 
             system_prompt = self._build_system_prompt()
             user_content = json.dumps(evidence_payload, indent=2, default=str)
@@ -80,7 +82,6 @@ class GeminiProvider(AIProviderBase):
             response = requests.post(
                 url,
                 headers=headers,
-                params=params,
                 json=request_body,
                 timeout=self.timeout
             )
@@ -121,14 +122,14 @@ class GeminiProvider(AIProviderBase):
             return self._build_empty_result("UNAVAILABLE", "requests library not available")
         except Exception as e:
             latency_ms = int((time.time() - start_time) * 1000)
-            error_str = str(e)
+            error_str = redact_text(str(e))
             # Check for timeout
             if "timeout" in error_str.lower() or "timed out" in error_str.lower():
                 return self._build_empty_result("TIMEOUT", f"Gemini: Request timed out", latency_ms)
             # Check for quota
             if "quota" in error_str.lower() or "resource" in error_str.lower():
                 return self._build_empty_result("QUOTA_EXCEEDED", f"Gemini: Quota exceeded", latency_ms)
-            logger.error(f"Gemini provider error: {e}", exc_info=False)
+            logger.error("Gemini provider error: %s", type(e).__name__)
             return self._build_empty_result("ERROR", f"Gemini: {error_str[:200]}", latency_ms)
 
     def _parse_ai_response(self, raw_text, latency_ms):

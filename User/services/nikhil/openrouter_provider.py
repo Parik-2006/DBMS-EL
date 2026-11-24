@@ -8,6 +8,7 @@ import time
 import logging
 
 from User.services.nikhil.ai_provider_base import AIProviderBase
+from User.security.redaction import redact_text
 
 logger = logging.getLogger(__name__)
 
@@ -128,10 +129,10 @@ class OpenRouterProvider(AIProviderBase):
             return self._build_empty_result("UNAVAILABLE", "requests library not available")
         except Exception as e:
             latency_ms = int((time.time() - start_time) * 1000)
-            error_str = str(e)
+            error_str = redact_text(str(e))
             if "timeout" in error_str.lower() or "timed out" in error_str.lower():
                 return self._build_empty_result("TIMEOUT", "OpenRouter: Request timed out", latency_ms)
-            logger.error(f"OpenRouter provider error: {e}", exc_info=False)
+            logger.error("OpenRouter provider error: %s", type(e).__name__)
             return self._build_empty_result("ERROR", f"OpenRouter: {error_str[:200]}", latency_ms)
 
     def _parse_ai_response(self, raw_text, latency_ms):

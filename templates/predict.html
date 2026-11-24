@@ -524,7 +524,11 @@
                 {% if mongo_ref %}
                 <p class="mongo-ref">
                   <strong>MongoDB Case Reference:</strong> <code>{{ mongo_ref }}</code>
+                  {% if forensic_status == 'CACHE_ONLY' %}<span class="badge badge-warning">Not durably stored (MongoDB unavailable)</span>{% elif forensic_status == 'STORED' %}<span class="badge badge-success">Stored</span>{% endif %}
                 </p>
+                {% endif %}
+                {% if status == 'FAILED' %}
+                <p class="text-danger"><strong>Scan state:</strong> FAILED &mdash; the result could not be persisted; the initial ML prediction was preserved.</p>
                 {% endif %}
 
                 {% if threat_intel_display %}

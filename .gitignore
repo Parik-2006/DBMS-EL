@@ -85,6 +85,7 @@ Desktop.ini
 .env
 .env.*
 *.env
+!.env.example
 
 # TLS / certificate material
 # The Aiven CA is supplied on Render as a Secret File and referenced through
@@ -100,6 +101,10 @@ Desktop.ini
 # Temporary/debug scripts and local tests
 query_db_canonical.py
 tests_local/
+
+# Local test artefacts (runtime /media/ is ignored above)
+.test_media/
+.test_*.sqlite3
 
 # Python cache artifacts
 *.pyc

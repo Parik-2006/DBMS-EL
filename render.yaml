@@ -15,7 +15,8 @@ services:
     # Root Directory is intentionally blank so manage.py is found at the repo root.
     rootDir: ""
     buildCommand: "./build.sh"
-    startCommand: "gunicorn MaliciousBot.wsgi:application"
+    # Worker timeout must exceed NIKHIL_MAX_SECONDS (deep-analysis budget, default 45 s).
+    startCommand: "gunicorn MaliciousBot.wsgi:application --workers 1 --threads 4 --timeout 120"
     healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION
@@ -78,4 +79,20 @@ services:
       - key: URLHAUS_API_KEY
         sync: false
       - key: ABUSEIPDB_API_KEY
+        sync: false
+      # --- Phase 1 security / reliability ---
+      # Shared rate-limit state across workers (Django DatabaseCache in the core DB).
+      - key: CACHE_BACKEND
+        value: database
+      - key: TRUSTED_PROXY_COUNT
+        value: "1"
+      - key: NIKHIL_MAX_SECONDS
+        value: "45"
+      - key: VISUAL_ANALYSIS_ENABLED
+        value: "true"
+      # Only needed if an external fallback worker posts to /api/fallback/result/ (>= 32 chars).
+      - key: FALLBACK_SERVICE_TOKEN
+        sync: false
+      # Hosts the MySQL app user connects from (used for tenant-DB GRANTs).
+      - key: MYSQL_APP_USER_HOSTS
         sync: false
