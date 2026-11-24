@@ -5,6 +5,12 @@ The orchestrator is NORMAL DETERMINISTIC CODE — no LLM decides the workflow.
 """
 import time
 import logging
+import concurrent.futures
+
+from django.conf import settings
+
+from User.security.redaction import safe_exception_message
+from User.security.tenancy import tenant_id_for_alias, is_valid_tenant_id
 from User.services.nikhil.webpage_analyzer import WebpageAnalyzer
 from User.services.nikhil.network_analyzer import NetworkAnalyzer
 from User.services.nikhil.visual_analyzer import VisualAnalyzer
@@ -33,7 +39,7 @@ class FallbackOrchestrator:
     Bounded total runtime.
     """
 
-    MAX_TOTAL_SECONDS = 60  # Overall fallback timeout
+    MAX_TOTAL_SECONDS = 60  # Default budget; overridden by settings.NIKHIL_MAX_SECONDS
 
     def __init__(self):
         self.webpage_analyzer = WebpageAnalyzer()
@@ -45,7 +51,8 @@ class FallbackOrchestrator:
         self.trusted_domain_service = TrustedDomainService()
         self.mongo_repo = MongoDBRepository()
 
-    def perform_deep_analysis(self, scan_id, url, initial_prediction=None, initial_confidence=None, pari_features=None):
+    def perform_deep_analysis(self, scan_id, url, initial_prediction=None, initial_confidence=None, pari_features=None,
+                              tenant_id=None, db_alias=None, investigation_id=None):
         """
         Execute deep analysis modules safely and assemble structured evidence.
 
@@ -56,10 +63,26 @@ class FallbackOrchestrator:
             initial_confidence: float initial ML confidence (optional)
             pari_features: dict original 10 PARI features (optional)
 
+            tenant_id: server-derived tenant ('user:<id>' | 'guest'); derived from
+                       db_alias / request context when omitted. Passed explicitly
+                       to every collector because worker threads do not inherit
+                       the request's context variables.
+            db_alias: tenant database alias for SQL history.
+            investigation_id: Scan.investigation_id (globally unique).
+
         Returns:
             tuple: (dict evidence_data, str mongo_doc_id)
         """
+        from User.db_manager import get_current_db
+        db_alias = db_alias or get_current_db() or 'guest_db'
+        if not is_valid_tenant_id(tenant_id):
+            tenant_id = tenant_id_for_alias(db_alias)
+        budget = float(getattr(settings, 'NIKHIL_MAX_SECONDS', self.MAX_TOTAL_SECONDS) or self.MAX_TOTAL_SECONDS)
         start_time = time.time()
+
+        def remaining():
+            return max(0.0, budget - (time.time() - start_time))
+
         logger.info(f"Orchestrating fallback deep analysis for Scan {scan_id}: {url}")
 
         # Ensure PARI features are available using existing extraction logic if not already provided
@@ -73,44 +96,58 @@ class FallbackOrchestrator:
 
         # Webpage and network checks are safe to overlap. Chromium is much heavier,
         # so visual analysis runs separately to reduce Render Free memory pressure.
-        import concurrent.futures
-
         def _run_webpage():
             try:
                 return self.webpage_analyzer.analyze_webpage(url)
             except Exception as e:
-                logger.error(f"Webpage analysis exception for Scan {scan_id}: {e}")
-                return {"status": "ERROR", "error": str(e), "indicators": [], "findings": []}
+                logger.error("Webpage analysis exception for Scan %s: %s", scan_id, safe_exception_message(e))
+                return {"status": "ERROR", "error": safe_exception_message(e), "indicators": [], "findings": []}
 
         def _run_network():
             try:
                 return self.network_analyzer.analyze_network(url)
             except Exception as e:
-                logger.error(f"Network analysis exception for Scan {scan_id}: {e}")
-                return {"status": "ERROR", "error": str(e), "network_findings": []}
+                logger.error("Network analysis exception for Scan %s: %s", scan_id, safe_exception_message(e))
+                return {"status": "ERROR", "error": safe_exception_message(e), "network_findings": []}
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix=f"nikhil-{scan_id}")
+        try:
             fut_webpage = executor.submit(_run_webpage)
             fut_network = executor.submit(_run_network)
-            webpage_evidence = fut_webpage.result()
-            network_evidence = fut_network.result()
+            try:
+                webpage_evidence = fut_webpage.result(timeout=remaining())
+            except concurrent.futures.TimeoutError:
+                webpage_evidence = {"status": "TIMEOUT", "error": "Deep-analysis time budget exceeded",
+                                    "indicators": [], "findings": []}
+            try:
+                network_evidence = fut_network.result(timeout=remaining())
+            except concurrent.futures.TimeoutError:
+                network_evidence = {"status": "TIMEOUT", "error": "Deep-analysis time budget exceeded",
+                                    "network_findings": []}
+        finally:
+            executor.shutdown(wait=False)
 
-        try:
-            visual_evidence = self.visual_analyzer.analyze_visual(url, scan_id=scan_id)
-        except Exception as e:
-            logger.error(f"Visual analysis exception for Scan {scan_id}: {e}")
-            visual_evidence = {"status": "UNAVAILABLE", "error": str(e), "visual_findings": []}
+        if remaining() < budget * 0.4:
+            visual_evidence = {"status": "TIMEOUT", "error": "Skipped: deep-analysis time budget",
+                               "visual_findings": [], "screenshot_reference": None}
+        else:
+            try:
+                visual_evidence = self.visual_analyzer.analyze_visual(
+                    url, scan_id=scan_id, tenant_id=tenant_id, investigation_id=investigation_id)
+            except Exception as e:
+                logger.error("Visual analysis exception for Scan %s: %s", scan_id, safe_exception_message(e))
+                visual_evidence = {"status": "UNAVAILABLE", "error": safe_exception_message(e), "visual_findings": []}
 
         # 4. Threat Intelligence & Trusted Domain Intelligence
         try:
             resolved_ip = network_evidence.get("ip_resolution", {}).get("primary_ip")
             domain_name = network_evidence.get("domain")
             threat_intel_evidence = self.threat_intel_service.analyze_threat_intel(
-                url, domain=domain_name, ip=resolved_ip, scan_id=scan_id
+                url, domain=domain_name, ip=resolved_ip, scan_id=scan_id, db_alias=db_alias
             )
         except Exception as e:
             logger.error(f"Threat intelligence exception for Scan {scan_id}: {e}")
-            threat_intel_evidence = {"status": "ERROR", "error": str(e), "external_indicators": []}
+            threat_intel_evidence = {"status": "ERROR", "error": safe_exception_message(e), "external_indicators": []}
 
         # 4b. Trusted domain lookup (merged into threat intel)
         try:
@@ -121,7 +158,7 @@ class FallbackOrchestrator:
         except Exception as e:
             logger.warning(f"Trusted domain service error for Scan {scan_id}: {e}")
             threat_intel_evidence["trusted_domain"] = {"is_known": False, "evidence_type": "ERROR"}
-            threat_intel_evidence["url_features"] = {"error": str(e)}
+            threat_intel_evidence["url_features"] = {"error": safe_exception_message(e)}
 
         # 5. Rule-Based Prompt-Injection Detection
         try:
@@ -129,14 +166,14 @@ class FallbackOrchestrator:
         except Exception as e:
             logger.error(f"Prompt injection detection exception for Scan {scan_id}: {e}")
             prompt_injection_evidence = {
-                "prompt_injection_detected": False, "error": str(e),
+                "prompt_injection_detected": False, "error": safe_exception_message(e),
                 "matched_patterns": [], "confidence": 0.0
             }
 
         # 6. AI Analysis (Gatekeeper + Provider Manager)
         # Check total elapsed time before AI
         elapsed = time.time() - start_time
-        if elapsed > self.MAX_TOTAL_SECONDS * 0.8:
+        if elapsed > budget * 0.8:
             logger.warning(f"Near time limit ({elapsed:.1f}s) — skipping AI for Scan {scan_id}")
             ai_evidence = {
                 "status": "NOT_RUN",
@@ -168,7 +205,7 @@ class FallbackOrchestrator:
                     "status": "ERROR",
                     "ai_required": False,
                     "ai_called": False,
-                    "error": str(e),
+                    "error": safe_exception_message(e),
                     "authoritative": False,
                     "timestamp": time.time()
                 }
@@ -183,6 +220,8 @@ class FallbackOrchestrator:
 
         evidence_data = {
             "scan_id": scan_id,
+            "tenant_id": tenant_id,
+            "investigation_id": str(investigation_id) if investigation_id else None,
             "url": url,
             "initial_ml": initial_ml_data,
             "analysis_status": "COMPLETED",
@@ -200,7 +239,12 @@ class FallbackOrchestrator:
         }
 
         # Store in MongoDB deep_analysis_cases (resilient with fallback cache)
-        mongo_doc_id = self.mongo_repo.store_evidence(evidence_data)
+        mongo_doc_id = self.mongo_repo.store_evidence(
+            evidence_data, tenant_id=tenant_id, investigation_id=investigation_id)
+        evidence_data["forensic_storage"] = {
+            "durable": getattr(self.mongo_repo, 'last_store_durable', False) is True,
+            "reference": mongo_doc_id,
+        }
 
         logger.info(f"Orchestration complete for Scan {scan_id} in {evidence_data['timestamps']['duration_seconds']}s")
         return evidence_data, mongo_doc_id

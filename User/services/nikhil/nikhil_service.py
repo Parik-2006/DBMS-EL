@@ -52,6 +52,14 @@ class NikhilService:
         initial_prediction = scan_data.get("initial_prediction")
         initial_confidence = scan_data.get("initial_confidence")
         pari_features = scan_data.get("pari_features")
+        db_alias = scan_data.get("db_alias")
+        investigation_id = scan_data.get("investigation_id")
+        tenant_id = scan_data.get("tenant_id")
+        if not tenant_id:
+            from User.db_manager import get_current_db
+            from User.security.tenancy import tenant_id_for_alias
+            db_alias = db_alias or get_current_db() or 'guest_db'
+            tenant_id = tenant_id_for_alias(db_alias)
         
         logger.info(f"Initiating evidence-driven fallback for Scan {scan_id}: {url}")
         
@@ -61,7 +69,10 @@ class NikhilService:
             scan_id, url,
             initial_prediction=initial_prediction,
             initial_confidence=initial_confidence,
-            pari_features=pari_features
+            pari_features=pari_features,
+            tenant_id=tenant_id,
+            db_alias=db_alias,
+            investigation_id=investigation_id,
         )
         
         # 2. Perform multi-family evidence corroboration & rule-based classification
@@ -69,6 +80,7 @@ class NikhilService:
         final_result = classifier.classify(initial_prediction, initial_confidence, evidence_data)
         
         # 3. Update MongoDB case record with final corroboration and classification
+        durable = bool((evidence_data.get("forensic_storage") or {}).get("durable"))
         try:
             evidence_data["corroboration"] = final_result.get("corroboration", {})
             evidence_data["final_analysis"] = {
@@ -79,9 +91,13 @@ class NikhilService:
                 "limitations": []
             }
             mongo_repo = self._get_mongo_repo()
-            mongo_repo.store_evidence(evidence_data)
+            ref = mongo_repo.store_evidence(evidence_data, tenant_id=tenant_id, investigation_id=investigation_id)
+            durable = getattr(mongo_repo, 'last_store_durable', False) is True
+            if durable:
+                mongo_doc_id = ref
         except Exception as e:
-            logger.warning(f"Failed to update MongoDB with final classification: {e}")
+            durable = False
+            logger.warning("Failed to update MongoDB with final classification: %s", type(e).__name__)
 
         # 4. Extract module statuses for UI display
         ai_data = evidence_data.get("ai_analysis", {})
@@ -140,6 +156,8 @@ class NikhilService:
             "evidence_summary": final_result["evidence_summary"],
             "threat_indicators": final_result.get("threat_indicators", []),
             "mongo_document_reference": mongo_doc_id,
+            "forensic_status": "STORED" if durable else "CACHE_ONLY",
+            "investigation_id": str(investigation_id) if investigation_id else None,
             "original_prediction": initial_prediction,
             "original_confidence": initial_confidence,
             "evidence_breakdown": final_result.get("evidence_breakdown", {}),
