@@ -126,11 +126,11 @@ class TrustedDomainService:
             }
         """
         try:
-            import tldextract
+            from User.services.domain_normalization import _EXTRACTOR
 
             parsed = urlparse(url if url.startswith(('http://', 'https://')) else f"http://{url}")
             hostname = (parsed.hostname or "").lower()
-            ext = tldextract.extract(hostname)
+            ext = _EXTRACTOR(hostname)
             registered_domain = f"{ext.domain}.{ext.suffix}".lower() if ext.suffix else hostname
 
             result = {
@@ -243,8 +243,8 @@ class TrustedDomainService:
 
             # Unusual TLD indicators
             unusual_tlds = {".tk", ".ml", ".ga", ".cf", ".gq", ".xyz", ".top", ".club", ".work", ".buzz"}
-            import tldextract
-            ext = tldextract.extract(hostname)
+            from User.services.domain_normalization import _EXTRACTOR
+            ext = _EXTRACTOR(hostname)
             tld = f".{ext.suffix}" if ext.suffix else ""
             unusual_tld = tld.lower() in unusual_tlds
 

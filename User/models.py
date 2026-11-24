@@ -1,3 +1,5 @@
+import uuid
+
 from django.db import models
 from django.contrib.auth.models import User
 from django.core.validators import URLValidator, validate_ipv4_address
@@ -28,6 +30,10 @@ class AnalystReview(models.Model):
     
     class Meta:
         db_table = 'pari_analyst_review'
+        permissions = [
+            ('submit_review', 'Can submit analyst reviews for scans'),
+            ('override_final_decision', 'Can override authoritative (non-review) final decisions'),
+        ]
         
     def __str__(self):
         return f"Review for Scan {self.scan.id}: {self.final_label}"
@@ -40,8 +46,11 @@ class MaliciousBot(models.Model):
     prediction_type = models.CharField(max_length=50, null=True, blank=True)
     confidence = models.CharField(max_length=50, null=True, blank=True)
     timestamp = models.DateTimeField(auto_now_add=True, null=True)
+    # Phase 1: exact link from a history row to the scan that produced it.
+    # Legacy rows keep NULL and are never guessed from URL text.
+    scan = models.ForeignKey('Scan', on_delete=models.SET_NULL, null=True, blank=True,
+                             related_name='history_entries')
 
-    
     def __str__(self):
         return f"{self.user} - {self.url} ({self.prediction_type})" if self.user else f"Guest - {self.url}"
     
@@ -59,7 +68,7 @@ class Domain(models.Model):
     ]
     
     domain_name = models.CharField(max_length=255, unique=True, db_index=True)
-    tld = models.CharField(max_length=10, null=True, blank=True)
+    tld = models.CharField(max_length=63, null=True, blank=True, help_text='Public suffix (e.g. com, co.in)')
     status = models.CharField(max_length=20, choices=DOMAIN_STATUS_CHOICES, default='UNKNOWN', db_index=True)
     risk_score = models.FloatField(default=0.0)
     last_scanned = models.DateTimeField(null=True, blank=True)
@@ -144,16 +153,35 @@ class Scan(models.Model):
         ('UNCERTAIN', 'Uncertain - routing to fallback'),
         ('DEEP_ANALYSIS', 'Deep analysis in progress'),
         ('COMPLETED', 'Completed - result stored'),
+        ('FAILED', 'Failed - fallback analysis or persistence failed'),
         ('ERROR', 'Error during scan'),
     ]
-    
+
+    FORENSIC_STATUS_CHOICES = [
+        ('NOT_APPLICABLE', 'Not applicable (confident ML, no deep analysis)'),
+        ('PENDING', 'Pending'),
+        ('STORED', 'Stored durably in MongoDB'),
+        ('CACHE_ONLY', 'Only in volatile in-process cache (not durable)'),
+        ('FAILED', 'Storage failed'),
+        ('MISSING', 'Expected evidence not found during reconciliation'),
+    ]
+
+    # Globally unique, server-generated investigation identity. Used to scope
+    # MongoDB documents and screenshots so per-tenant auto-increment ids can
+    # never collide across users.
+    investigation_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='scans', null=True, blank=True, db_constraint=False)
     url = models.ForeignKey(URL, on_delete=models.CASCADE, related_name='scans')
     status = models.CharField(max_length=20, choices=SCAN_STATUS_CHOICES, db_index=True)
     
     initial_model = models.CharField(max_length=50, default='RandomForest', help_text='ML model used for initial prediction')
     fallback_model = models.CharField(max_length=50, null=True, blank=True, help_text='Fallback model if used')
-    
+    ip = models.ForeignKey('IP', on_delete=models.SET_NULL, null=True, blank=True, related_name='scans',
+                           help_text='Validated public IP observed by network analysis for this scan')
+    forensic_status = models.CharField(max_length=20, choices=FORENSIC_STATUS_CHOICES,
+                                       default='NOT_APPLICABLE', db_index=True)
+    failure_reason = models.CharField(max_length=255, blank=True, default='')
+
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
     completed_at = models.DateTimeField(null=True, blank=True)

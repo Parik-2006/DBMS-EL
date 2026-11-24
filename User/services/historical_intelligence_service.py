@@ -22,6 +22,7 @@ from django.db.models import Avg, Max, Count, Q
 from django.utils import timezone
 
 from User.db_manager import get_current_db
+from User.services.domain_normalization import normalize_hostname, registered_domain_for
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +67,10 @@ class HistoricalIntelligenceService:
         )
 
         parsed = urlparse(url if url.startswith(('http://', 'https://')) else f"http://{url}")
-        host = (domain or parsed.hostname or url).lower().strip()
+        host = normalize_hostname(domain or parsed.hostname or url)
+        # Phase 1: correlate on the public-suffix-aware registered domain, which is
+        # exactly what pari_domain.domain_name stores (www.google.co.in -> google.co.in).
+        registered = registered_domain_for(host) or host
         target_url = url.strip()
 
         # Initialize base response
@@ -74,6 +78,7 @@ class HistoricalIntelligenceService:
             "status": "SUCCESS",
             "target_url": target_url,
             "target_domain": host,
+            "target_registered_domain": registered,
             "target_ip": ip,
             "exclude_scan_id": exclude_scan_id,
             "exact_url_history": {
@@ -150,8 +155,8 @@ class HistoricalIntelligenceService:
             # -------------------------------------------------------------
             # 1. Domain History Lookup
             # -------------------------------------------------------------
-            domain_obj = Domain.objects.using(target_db).filter(domain_name__iexact=host).first()
-            domain_scans_qs = Scan.objects.none()
+            domain_obj = Domain.objects.using(target_db).filter(domain_name__iexact=registered).first()
+            domain_scans_qs = Scan.objects.using(target_db).none()
 
             if domain_obj:
                 result["domain_history"]["domain_status"] = domain_obj.status
@@ -345,16 +350,27 @@ class HistoricalIntelligenceService:
                     result["ip_history"]["country"] = ip_obj.country
                     result["ip_history"]["risk_score"] = ip_obj.risk_score
 
-                # Find scans associated with this IP through ThreatIndicator
-                ip_scans_qs = ScanIndicator.objects.using(target_db).filter(
-                    indicator__indicator_type='IP_ADDRESS',
-                    indicator__indicator_value=ip
+                # Scans linked to this IP: direct observation (Scan.ip) plus legacy
+                # IP_ADDRESS threat indicators.
+                ip_scan_ids = set(
+                    Scan.objects.using(target_db).filter(ip__ip_address=ip).values_list('id', flat=True)
                 )
-                if exclude_scan_id is not None:
-                    ip_scans_qs = ip_scans_qs.exclude(scan_id=exclude_scan_id)
-
-                ip_scan_count = ip_scans_qs.values('scan_id').distinct().count()
+                ip_scan_ids.update(
+                    ScanIndicator.objects.using(target_db).filter(
+                        indicator__indicator_type='IP_ADDRESS', indicator__indicator_value=ip
+                    ).values_list('scan_id', flat=True)
+                )
+                ip_scan_ids.discard(exclude_scan_id)
+                ip_scan_count = len(ip_scan_ids)
                 result["ip_history"]["scan_count"] = ip_scan_count
+                if ip_scan_ids:
+                    other_domains = (
+                        Domain.objects.using(target_db)
+                        .filter(urls__scans__id__in=ip_scan_ids)
+                        .exclude(domain_name__iexact=registered)
+                        .values_list('domain_name', flat=True).distinct()[:20]
+                    )
+                    result["ip_history"]["co_hosted_domains"] = sorted(other_domains)
                 result["ip_history"]["seen"] = bool(ip_scan_count > 0 or (ip_obj and ip_obj.status != 'UNKNOWN'))
 
             # -------------------------------------------------------------
@@ -473,7 +489,7 @@ class HistoricalIntelligenceService:
             ScanFinalDecision
         )
 
-        host = domain_name.lower().strip()
+        host = registered_domain_for(normalize_hostname(domain_name)) or normalize_hostname(domain_name)
 
         # Handle HistoryClearEvent if requested
         cleared_after = None

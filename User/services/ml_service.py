@@ -7,6 +7,9 @@ from User.services import get_confidence_threshold
 import json
 import logging
 
+from django.db import transaction
+from django.utils import timezone
+
 logger = logging.getLogger(__name__)
 
 
@@ -34,9 +37,14 @@ class MLPredictionService:
     ]
 
     @staticmethod
-    def create_scan_record(url_obj, user=None):
-        """Create a new scan record"""
-        scan = Scan.objects.create(
+    def _alias(db=None):
+        from User.db_manager import get_current_db
+        return db or get_current_db() or 'guest_db'
+
+    @staticmethod
+    def create_scan_record(url_obj, user=None, db=None):
+        """Create a new scan record in the tenant database."""
+        scan = Scan.objects.using(MLPredictionService._alias(db)).create(
             user=user,
             url=url_obj,
             status='UNCERTAIN',
@@ -95,7 +103,7 @@ class MLPredictionService:
         }
 
     @staticmethod
-    def make_prediction(pipeline, url, scan_obj):
+    def make_prediction(pipeline, url, scan_obj, db=None):
         """
         Make prediction using pipeline and store result with confidence routing
 
@@ -159,66 +167,42 @@ class MLPredictionService:
             is_confident = bool(confidence >= threshold)
 
             scan_status = 'CONFIDENT' if is_confident else 'UNCERTAIN'
-            scan_obj.status = scan_status
-            scan_obj.save()
+            alias = MLPredictionService._alias(db)
 
-            prediction = Prediction.objects.create(
-                scan=scan_obj,
-                model_name='RandomForest',
-                predicted_class=predicted_class_name,
-                confidence=confidence,
-                risk_score=risk_score,
-                probabilities=probabilities_dict,
-                # --- PHASE 3: initial-ML snapshot fields ---
-                threshold_used=threshold,
-                is_confident=is_confident,
-            )
+            # Phase 1: initial-ML persistence is one atomic unit on the tenant DB.
+            # An existing initial prediction is never overwritten (get_or_create).
+            with transaction.atomic(using=alias):
+                scan_obj.status = scan_status
+                if is_confident:
+                    scan_obj.forensic_status = 'NOT_APPLICABLE'
+                    scan_obj.completed_at = timezone.now()
+                scan_obj.save(using=alias)
 
-            # --- PHASE 2: Persist PARI 10 features in MySQL ---
-            # Uses the exact same pari_features dict already passed to RandomForest.
-            # get_or_create ensures idempotency; the scan field is OneToOne so
-            # a second call for the same scan simply returns the existing row.
-            try:
-                ScanFeatures.objects.get_or_create(
+                prediction, _ = Prediction.objects.using(alias).get_or_create(
                     scan=scan_obj,
                     defaults={
-                        'url_len':              pari_features['url_len'],
-                        'letters_count':        pari_features['letters_count'],
-                        'digits_count':         pari_features['digits_count'],
-                        'special_chars_count':  pari_features['special_chars_count'],
-                        'shortened':            pari_features['shortened'],
-                        'abnormal_url':         pari_features['abnormal_url'],
-                        'secure_http':          pari_features['secure_http'],
-                        'have_ip':              pari_features['have_ip'],
-                        'url_region':           pari_features['url_region'],
-                        'root_domain':          pari_features['root_domain'],
-                    }
+                        'model_name': 'RandomForest',
+                        'predicted_class': predicted_class_name,
+                        'confidence': confidence,
+                        'risk_score': risk_score,
+                        'probabilities': probabilities_dict,
+                        'threshold_used': threshold,
+                        'is_confident': is_confident,
+                    },
                 )
-            except Exception as feat_err:
-                # Never allow a MySQL feature-write failure to crash the scan pipeline.
-                logger.error(
-                    "Failed to persist ScanFeatures for scan %s: %s",
-                    scan_obj.id, feat_err
+                ScanFeatures.objects.using(alias).get_or_create(
+                    scan=scan_obj,
+                    defaults={name: pari_features[name] for name in MLPredictionService.PARI_FEATURE_NAMES},
                 )
-            # --- END PHASE 2 ---
-
-            # --- PHASE 10: Persist confident final decision if RF is confident ---
-            if is_confident:
-                try:
+                if is_confident:
                     from User.services.fallback_service import FallbackIntegrationService
                     FallbackIntegrationService.persist_confident_final_decision(
                         scan=scan_obj,
                         predicted_class=predicted_class_name,
                         confidence=confidence,
-                        risk_score=risk_score
+                        risk_score=risk_score,
+                        db=alias,
                     )
-                except Exception as fd_err:
-                    logger.error(
-                        "Failed to persist confident ScanFinalDecision for scan %s: %s",
-                        scan_obj.id, fd_err
-                    )
-            # --- END PHASE 10 ---
-
 
             scan_obj._pari_features = pari_features
             prediction._pari_features = pari_features
@@ -239,8 +223,11 @@ class MLPredictionService:
             }
 
         except Exception as e:
+            alias = MLPredictionService._alias(db)
+            logger.error("initial ML prediction failed for scan %s on %s: %s", scan_obj.id, alias, type(e).__name__)
+            Scan.objects.using(alias).filter(id=scan_obj.id).update(
+                status='ERROR', failure_reason=f"Initial ML prediction failed: {type(e).__name__}"[:255])
             scan_obj.status = 'ERROR'
-            scan_obj.save()
             raise
 
     @staticmethod

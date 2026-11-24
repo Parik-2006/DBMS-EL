@@ -153,19 +153,49 @@ def ensure_mysql_database_exists(database_name):
                 f"CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
             )
             created = True
-            app_user = os.environ.get('MYSQL_USER', 'maliciousbot_app')
-            for host in ['localhost', '127.0.0.1']:
-                try:
-                    cursor.execute(
-                        f"GRANT ALL PRIVILEGES ON `{database_name}`.* TO '{app_user}'@'{host}'"
-                    )
-                except Exception:
-                    pass
-            cursor.execute("FLUSH PRIVILEGES")
+            _grant_tenant_privileges(cursor, database_name, admin_cfg)
         conn.commit()
         return created
     finally:
         conn.close()
+
+# Least-privilege runtime grant for a tenant database. The application user needs
+# DML plus the DDL used by Django migrations on its own tenant databases only.
+# It never receives GRANT OPTION, global privileges or access to other schemas.
+TENANT_DB_PRIVILEGES = (
+    'SELECT', 'INSERT', 'UPDATE', 'DELETE', 'CREATE', 'ALTER', 'INDEX',
+    'DROP', 'REFERENCES', 'CREATE TEMPORARY TABLES', 'LOCK TABLES',
+)
+_SAFE_IDENT = re.compile(r'^[A-Za-z0-9_.-]{1,80}$')
+_SAFE_HOST = re.compile(r'^[A-Za-z0-9_.%:-]{1,255}$')
+
+
+def _grant_tenant_privileges(cursor, database_name, admin_cfg):
+    """
+    Grant the runtime application user least-privilege access to a newly
+    created tenant database. Skipped when the provisioning account *is* the
+    application account (it already owns what it creates). Failures are logged
+    (never silently ignored) but do not abort provisioning, because managed
+    MySQL services (e.g. Aiven) may manage grants out-of-band.
+    """
+    app_user = os.environ.get('MYSQL_USER', 'maliciousbot_app')
+    if app_user == admin_cfg.get('USER'):
+        return
+    if not _SAFE_IDENT.match(app_user):
+        logger.error("[PROVISION] refusing to grant privileges: unsafe MYSQL_USER value")
+        return
+    hosts = [h.strip() for h in os.environ.get('MYSQL_APP_USER_HOSTS', 'localhost,127.0.0.1').split(',') if h.strip()]
+    privileges = ', '.join(TENANT_DB_PRIVILEGES)
+    for host in hosts:
+        if not _SAFE_HOST.match(host):
+            logger.error("[PROVISION] skipping unsafe MYSQL_APP_USER_HOSTS entry")
+            continue
+        try:
+            cursor.execute(f"GRANT {privileges} ON `{database_name}`.* TO %s@%s", (app_user, host))
+        except Exception as exc:
+            logger.warning("[PROVISION] grant on %s for app user @%s failed: %s",
+                           database_name, host, type(exc).__name__)
+
 
 def register_database_connection(db_alias, database_name):
     """
@@ -188,9 +218,9 @@ def get_user_database_models():
         ('User', 'IP'),
         ('User', 'ThreatIndicator'),
         ('User', 'HistoryClearEvent'),
-        ('User', 'MaliciousBot'),
         ('User', 'URL'),
         ('User', 'Scan'),
+        ('User', 'MaliciousBot'),
         ('User', 'AnalystReview'),
         ('User', 'Prediction'),
         ('User', 'ScanFeatures'),

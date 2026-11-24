@@ -3,7 +3,8 @@ from User.db_manager import get_current_db
 
 logger = logging.getLogger(__name__)
 
-CONTROL_APPS = {'auth', 'sessions', 'contenttypes', 'admin'}
+# 'django_cache' = Django DatabaseCache (shared rate-limit state) lives in the core DB.
+CONTROL_APPS = {'auth', 'sessions', 'contenttypes', 'admin', 'django_cache'}
 CONTROL_MODELS = {'userdatabaseregistry'}
 
 class UserDatabaseRouter:
@@ -16,17 +17,26 @@ class UserDatabaseRouter:
       to the current user's isolated database, or 'guest_db' when unauthenticated.
     """
 
-    def db_for_read(self, model, **hints):
+    @staticmethod
+    def _tenant_db(model, hints):
         if model._meta.app_label in CONTROL_APPS or model._meta.model_name in CONTROL_MODELS:
             return 'default'
-        current = get_current_db()
-        return current or 'guest_db'
+        # Related-object access (scan.url, scan.prediction, ...) must stay in the
+        # database the instance was loaded from, even outside a request context
+        # (management commands, worker threads).
+        instance = hints.get('instance')
+        if instance is not None:
+            inst_db = getattr(getattr(instance, '_state', None), 'db', None)
+            inst_meta = getattr(instance, '_meta', None)
+            if inst_db and inst_db != 'default' and inst_meta is not None                     and inst_meta.app_label not in CONTROL_APPS and inst_meta.model_name not in CONTROL_MODELS:
+                return inst_db
+        return get_current_db() or 'guest_db'
+
+    def db_for_read(self, model, **hints):
+        return self._tenant_db(model, hints)
 
     def db_for_write(self, model, **hints):
-        if model._meta.app_label in CONTROL_APPS or model._meta.model_name in CONTROL_MODELS:
-            return 'default'
-        current = get_current_db()
-        return current or 'guest_db'
+        return self._tenant_db(model, hints)
 
     def allow_relation(self, obj1, obj2, **hints):
         """Allow relations across models (e.g. Scan referencing auth.User)."""

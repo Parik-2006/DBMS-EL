@@ -1,4 +1,5 @@
 from User.db_manager import ensure_user_database, set_current_db, reset_current_db
+from User.security.tenancy import tenant_id_for_alias
 
 # Diagnostic endpoints must stay cheap: Render polls them continuously, and
 # provisioning a database issues CREATE DATABASE / GRANT against the MySQL
@@ -28,6 +29,8 @@ class UserDatabaseMiddleware:
 
             token = set_current_db(db_alias)
             request.user_db = db_alias
+            # Authoritative tenant identity (never taken from client input).
+            request.tenant_id = tenant_id_for_alias(db_alias)
             response = self.get_response(request)
             return response
         finally:

@@ -1,10 +1,13 @@
+from datetime import timedelta
+
 from django.db import transaction, models
 from django.utils import timezone
 from User.models import (
     Scan, Prediction, ThreatIndicator, ScanIndicator,
     ScanFallbackResult, ScanEvidenceSummary, ScanAIEvidence,
-    ScanFinalDecision
+    ScanFinalDecision, IP
 )
+from User.security.redaction import safe_exception_message
 import json
 import logging
 
@@ -19,7 +22,7 @@ class FallbackIntegrationService:
     VALID_RISK_LEVELS = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL']
     
     @staticmethod
-    def validate_fallback_result(data):
+    def validate_fallback_result(data, db=None):
         """
         Validate incoming fallback result against contract
         
@@ -49,7 +52,7 @@ class FallbackIntegrationService:
         if 'scan_id' in data:
             try:
                 scan_id = int(data['scan_id'])
-                if not Scan.objects.filter(id=scan_id).exists():
+                if not Scan.objects.using(FallbackIntegrationService.resolve_alias(db)).filter(id=scan_id).exists():
                     errors.append(f"Scan ID {scan_id} not found")
             except (ValueError, TypeError):
                 errors.append("scan_id must be an integer")
@@ -76,179 +79,214 @@ class FallbackIntegrationService:
         
         return len(errors) == 0, errors
     
-    @staticmethod
-    @transaction.atomic
-    def process_fallback_result(result_data):
-        """
-        Process fallback system result and update scan/prediction records
-        
-        Returns:
-            {
-                'success': bool,
-                'scan_id': int,
-                'message': str,
-                'errors': [str]
-            }
-        """
-        errors = []
-        
-        valid, validation_errors = FallbackIntegrationService.validate_fallback_result(result_data)
-        if not valid:
-            return {
-                'success': False,
-                'scan_id': result_data.get('scan_id'),
-                'message': 'Validation failed',
-                'errors': validation_errors
-            }
-        
-        try:
-            scan_id = int(result_data['scan_id'])
-            scan = Scan.objects.get(id=scan_id)
-            
-            final_classification = result_data['final_classification']
-            risk_score = float(result_data['risk_score'])
-            analysis_status = result_data['analysis_status']
-            threat_indicators = result_data.get('threat_indicators', [])
-            evidence_summary = result_data.get('evidence_summary', '')
-            mongo_ref = result_data.get('mongo_document_reference')
-            
-            if scan.status not in ['UNCERTAIN', 'DEEP_ANALYSIS']:
-                errors.append(f"Cannot update scan in status {scan.status}. Expected UNCERTAIN or DEEP_ANALYSIS.")
-                return {
-                    'success': False,
-                    'scan_id': scan_id,
-                    'message': 'Invalid scan state',
-                    'errors': errors
-                }
-            
-            # --- PHASE 3: Write fallback result to ScanFallbackResult. ---
-            # The existing pari_prediction row (RandomForest initial result)
-            # is LEFT COMPLETELY UNCHANGED. DeepAnalysis data goes to its
-            # own table: pari_scan_fallback.
-            risk_level = result_data.get('risk_level', None)
-            evidence_summary = result_data.get('evidence_summary', '') or ''
-            mongo_ref = result_data.get('mongo_document_reference')
+    PROCESSABLE_STATUSES = ('UNCERTAIN', 'DEEP_ANALYSIS', 'FAILED')
 
-            try:
-                ScanFallbackResult.objects.get_or_create(
+    @staticmethod
+    def resolve_alias(db_alias=None):
+        """Authoritative tenant DB alias for persistence (explicit > request context > guest)."""
+        from User.db_manager import get_current_db
+        return db_alias or get_current_db() or 'guest_db'
+
+    @staticmethod
+    def process_fallback_result(result_data, db_alias=None, tenant_id=None):
+        """
+        Persist a Nikhil fallback result into the tenant's relational records.
+
+        All relational writes (fallback result, evidence summaries, AI evidence,
+        final decision, threat indicators, observed IP, scan completion) run in
+        ONE transaction on the tenant database alias. Any failure rolls the whole
+        set back, the scan is marked FAILED with a safe reason, and the original
+        RandomForest prediction (pari_prediction) is left untouched.
+
+        MongoDB is a separate system: it is NOT part of this transaction. Its
+        durability is recorded in Scan.forensic_status and reconciled by
+        ``manage.py reconcile_scans``.
+
+        Idempotent: re-processing an already COMPLETED scan returns success with
+        ``already_completed=True`` and changes nothing (authoritative decisions
+        are never silently overwritten).
+        """
+        from User.security.tenancy import tenant_id_for_alias
+
+        if not isinstance(result_data, dict):
+            return {'success': False, 'scan_id': None, 'message': 'Validation failed',
+                    'errors': ['Result must be a dictionary']}
+        alias = FallbackIntegrationService.resolve_alias(db_alias)
+        tenant_id = tenant_id or tenant_id_for_alias(alias)
+
+        valid, validation_errors = FallbackIntegrationService.validate_fallback_result(result_data, db=alias)
+        if not valid:
+            return {'success': False, 'scan_id': result_data.get('scan_id'),
+                    'message': 'Validation failed', 'errors': validation_errors}
+
+        scan_id = int(result_data['scan_id'])
+        final_classification = result_data['final_classification']
+        risk_score = float(result_data['risk_score'])
+        try:
+            with transaction.atomic(using=alias):
+                scan = Scan.objects.using(alias).select_for_update().get(id=scan_id)
+
+                expected_inv = result_data.get('investigation_id')
+                if expected_inv and str(scan.investigation_id) != str(expected_inv):
+                    return {'success': False, 'scan_id': scan_id, 'message': 'Investigation identity mismatch',
+                            'errors': ['investigation_id does not match this scan']}
+
+                if scan.status == 'COMPLETED':
+                    return {'success': True, 'scan_id': scan_id, 'already_completed': True,
+                            'message': f'Scan {scan_id} was already completed; no changes made', 'errors': None}
+
+                if scan.status not in FallbackIntegrationService.PROCESSABLE_STATUSES:
+                    return {'success': False, 'scan_id': scan_id, 'message': 'Invalid scan state',
+                            'errors': [f"Cannot update scan in status {scan.status}."]}
+
+                risk_level = result_data.get('risk_level')
+                evidence_summary = result_data.get('evidence_summary') or ''
+                mongo_ref = result_data.get('mongo_document_reference')
+
+                ScanFallbackResult.objects.using(alias).update_or_create(
                     scan=scan,
                     defaults={
-                        'service_name':           'DeepAnalysis',
-                        'classification':         final_classification,
-                        'risk_score':             risk_score,
-                        'risk_level':             risk_level if risk_level in ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'] else None,
-                        'evidence_summary':       evidence_summary[:500],
-                        'mongo_document_reference': mongo_ref,
-                    }
+                        'service_name': 'DeepAnalysis',
+                        'classification': final_classification,
+                        'risk_score': risk_score,
+                        'risk_level': risk_level if risk_level in FallbackIntegrationService.VALID_RISK_LEVELS else None,
+                        'evidence_summary': evidence_summary[:500],
+                        'mongo_document_reference': str(mongo_ref)[:100] if mongo_ref else None,
+                    },
                 )
-            except Exception as fb_err:
-                logger.error(
-                    "Failed to persist ScanFallbackResult for scan %s: %s",
-                    scan.id, fb_err
-                )
-                errors.append(f"Fallback result DB write failed: {fb_err}")
-            # --- END PHASE 3 ---
+                FallbackIntegrationService.persist_evidence_summaries(scan, result_data, db=alias, tenant_id=tenant_id)
+                FallbackIntegrationService.persist_ai_evidence(scan, result_data, db=alias, tenant_id=tenant_id)
+                FallbackIntegrationService.persist_final_decision(scan, result_data, db=alias)
+                FallbackIntegrationService.persist_threat_indicators(
+                    scan, result_data.get('threat_indicators', []), db=alias)
+                FallbackIntegrationService.link_observed_ip(scan, result_data, db=alias)
 
-            # --- PHASE 4: Persist structured evidence summary in MySQL (pari_evidence_summary) ---
-            try:
-                FallbackIntegrationService.persist_evidence_summaries(scan, result_data)
-            except Exception as ev_err:
-                logger.error(
-                    "Failed to persist evidence summaries for scan %s: %s",
-                    scan.id, ev_err
-                )
-                errors.append(f"Evidence summary DB write failed: {ev_err}")
-            # --- END PHASE 4 ---
-
-            # --- PHASE 5: Persist structured AI evidence summary in MySQL (pari_ai_evidence) ---
-            try:
-                FallbackIntegrationService.persist_ai_evidence(scan, result_data)
-            except Exception as ai_err:
-                logger.error(
-                    "Failed to persist AI evidence for scan %s: %s",
-                    scan.id, ai_err
-                )
-                errors.append(f"AI evidence DB write failed: {ai_err}")
-            # --- END PHASE 5 ---
-            
-            # --- PHASE 10: Persist structured final decision in MySQL (pari_final_decision) ---
-            try:
-                FallbackIntegrationService.persist_final_decision(scan, result_data)
-            except Exception as fd_err:
-                logger.error(
-                    "Failed to persist final decision for scan %s: %s",
-                    scan.id, fd_err
-                )
-                errors.append(f"Final decision DB write failed: {fd_err}")
-            # --- END PHASE 10 ---
-
-            # --- PHASE 8 & 9: Persist threat indicators with explainability provenance ---
-            for indicator_str in threat_indicators:
-                try:
-                    indicator_type = indicator_str.split(':')[0].strip() if ':' in indicator_str else 'OTHER'
-                    indicator_value = indicator_str.split(':', 1)[1].strip() if ':' in indicator_str else indicator_str
-
-                    source_comp, ind_reason, ind_sev = FallbackIntegrationService.resolve_indicator_provenance(indicator_type, indicator_value)
-
-                    threat_indicator, created = ThreatIndicator.objects.get_or_create(
-                        indicator_type=indicator_type,
-                        indicator_value=indicator_value,
-                        defaults={'severity': ind_sev}
-                    )
-                    
-                    scan_indicator, created = ScanIndicator.objects.update_or_create(
-                        scan=scan,
-                        indicator=threat_indicator,
-                        defaults={
-                            'source_component': source_comp,
-                            'reason': ind_reason,
-                            'severity': ind_sev,
-                        }
-                    )
-                except Exception as e:
-                    errors.append(f"Error processing threat indicator {indicator_str}: {str(e)}")
-            # --- END PHASE 8 & 9 ---
-
-            
-            scan.status = 'COMPLETED'
-            scan.fallback_model = 'DeepAnalysis'
-            scan.completed_at = timezone.now()
-            scan.save()
-            
-            return {
-                'success': True,
-                'scan_id': scan_id,
-                'message': f'Scan {scan_id} completed. Final classification: {final_classification} (Risk: {risk_score:.2f})',
-                'errors': errors if errors else None
-            }
-        
+                forensic_status = result_data.get('forensic_status')
+                if forensic_status in dict(Scan.FORENSIC_STATUS_CHOICES):
+                    scan.forensic_status = forensic_status
+                scan.status = 'COMPLETED'
+                scan.fallback_model = 'DeepAnalysis'
+                scan.failure_reason = ''
+                scan.completed_at = timezone.now()
+                scan.save(using=alias)
         except Scan.DoesNotExist:
-            return {
-                'success': False,
-                'scan_id': result_data.get('scan_id'),
-                'message': f"Scan {result_data.get('scan_id')} not found",
-                'errors': ['Scan not found in database']
-            }
-        except Exception as e:
-            return {
-                'success': False,
-                'scan_id': result_data.get('scan_id'),
-                'message': f'Error processing result: {str(e)}',
-                'errors': [str(e)]
-            }
-    
+            return {'success': False, 'scan_id': scan_id, 'message': f'Scan {scan_id} not found',
+                    'errors': ['Scan not found in database']}
+        except Exception as exc:
+            reason = f"Fallback persistence failed: {type(exc).__name__}"
+            logger.error("fallback persistence rolled back for scan %s on %s: %s",
+                         scan_id, alias, safe_exception_message(exc))
+            FallbackIntegrationService.mark_scan_failed(scan_id, reason, db=alias)
+            return {'success': False, 'scan_id': scan_id,
+                    'message': 'Fallback persistence failed; changes rolled back', 'errors': [reason]}
+
+        return {
+            'success': True,
+            'scan_id': scan_id,
+            'message': f'Scan {scan_id} completed. Final classification: {final_classification} (Risk: {risk_score:.2f})',
+            'errors': None,
+        }
+
     @staticmethod
-    def get_uncertain_scans(limit=10):
-        """Get scans awaiting fallback analysis"""
-        return Scan.objects.filter(
-            status='UNCERTAIN'
-        ).select_related('url', 'prediction').order_by('-created_at')[:limit]
-    
-    @staticmethod
-    def get_scan_status(scan_id):
-        """Get current status of a scan, returning initial ML and fallback results separately."""
+    def mark_scan_failed(scan_id, reason, db=None):
+        """Record a failure state without touching the original ML prediction."""
+        alias = FallbackIntegrationService.resolve_alias(db)
         try:
-            scan = Scan.objects.get(id=scan_id)
+            return Scan.objects.using(alias).filter(id=scan_id).exclude(status='COMPLETED').update(
+                status='FAILED', failure_reason=str(reason)[:255], updated_at=timezone.now())
+        except Exception as exc:
+            logger.error("could not mark scan %s FAILED on %s: %s", scan_id, alias, type(exc).__name__)
+            return 0
+
+    @staticmethod
+    def mark_deep_analysis_started(scan, db=None):
+        """UNCERTAIN -> DEEP_ANALYSIS transition before Nikhil runs."""
+        alias = FallbackIntegrationService.resolve_alias(db)
+        Scan.objects.using(alias).filter(id=scan.id, status__in=['UNCERTAIN', 'FAILED']).update(
+            status='DEEP_ANALYSIS', forensic_status='PENDING', failure_reason='', updated_at=timezone.now())
+        scan.status = 'DEEP_ANALYSIS'
+        scan.forensic_status = 'PENDING'
+
+    @staticmethod
+    def recover_stale_scans(db=None, older_than_minutes=None):
+        """
+        Mark scans stuck in UNCERTAIN/DEEP_ANALYSIS (worker killed, timeout,
+        crash) as FAILED so they never remain pending forever. The initial ML
+        prediction is preserved. Returns the number of recovered scans.
+        """
+        from django.conf import settings
+        alias = FallbackIntegrationService.resolve_alias(db)
+        minutes = older_than_minutes if older_than_minutes is not None else getattr(settings, 'STALE_SCAN_MINUTES', 15)
+        cutoff = timezone.now() - timedelta(minutes=minutes)
+        return Scan.objects.using(alias).filter(
+            status__in=['UNCERTAIN', 'DEEP_ANALYSIS'], updated_at__lt=cutoff
+        ).update(status='FAILED', failure_reason='Interrupted: deep analysis did not complete (recovered)',
+                 updated_at=timezone.now())
+
+    @staticmethod
+    def persist_threat_indicators(scan, threat_indicators, db):
+        if not isinstance(threat_indicators, list):
+            raise ValueError('threat_indicators must be a list')
+        for indicator_str in threat_indicators:
+            indicator_str = str(indicator_str)
+            if ':' in indicator_str:
+                indicator_type, indicator_value = indicator_str.split(':', 1)
+            else:
+                indicator_type, indicator_value = 'OTHER', indicator_str
+            indicator_type = (indicator_type.strip() or 'OTHER')[:30]
+            indicator_value = indicator_value.strip()[:255]
+            source_comp, ind_reason, ind_sev = FallbackIntegrationService.resolve_indicator_provenance(
+                indicator_type, indicator_value)
+            threat_indicator, _ = ThreatIndicator.objects.using(db).get_or_create(
+                indicator_type=indicator_type, indicator_value=indicator_value, defaults={'severity': ind_sev})
+            ScanIndicator.objects.using(db).update_or_create(
+                scan=scan, indicator=threat_indicator,
+                defaults={'source_component': source_comp[:100], 'reason': ind_reason[:500], 'severity': ind_sev})
+
+    @staticmethod
+    def link_observed_ip(scan, result_data, db):
+        """Record the validated public IP observed by network analysis and link it to the scan."""
+        from User.security.outbound import is_public_ip
+        evidence = result_data.get('evidence_data') or {}
+        network = evidence.get('network') or {}
+        if network.get('status') != 'SUCCESS':
+            return None
+        ip = (network.get('ip_resolution') or {}).get('primary_ip')
+        if not ip or not is_public_ip(ip):
+            return None
+        ip_obj, _ = IP.objects.using(db).get_or_create(ip_address=ip)
+        abuse = ((evidence.get('threat_intelligence') or {}).get('sources') or {}).get('abuseipdb') or {}
+        if abuse.get('status') == 'SUCCESS':
+            score = abuse.get('abuse_confidence_score') or 0
+            ip_obj.risk_score = max(0.0, min(1.0, float(score) / 100.0))
+            if score >= 75:
+                ip_obj.status = 'MALICIOUS'
+            elif score >= 25:
+                ip_obj.status = 'SUSPICIOUS'
+            if abuse.get('country_code'):
+                ip_obj.country = str(abuse['country_code'])[:100]
+            ip_obj.save(using=db)
+        scan.ip = ip_obj
+        return ip_obj
+
+    @staticmethod
+    def get_uncertain_scans(limit=10, db=None, user_id=None):
+        """Get scans awaiting fallback analysis in one tenant database."""
+        alias = FallbackIntegrationService.resolve_alias(db)
+        qs = Scan.objects.using(alias).filter(status__in=['UNCERTAIN', 'DEEP_ANALYSIS'])
+        if user_id is not None:
+            qs = qs.filter(user_id=user_id)
+        return qs.select_related('url', 'prediction').order_by('-created_at')[:limit]
+
+    @staticmethod
+    def get_scan_status(scan_id, db=None, user_id=None):
+        """Get current status of a scan, returning initial ML and fallback results separately."""
+        alias = FallbackIntegrationService.resolve_alias(db)
+        try:
+            qs = Scan.objects.using(alias)
+            if user_id is not None:
+                qs = qs.filter(user_id=user_id)
+            scan = qs.get(id=scan_id)
             # Initial RandomForest prediction (pari_prediction)
             prediction = scan.prediction if hasattr(scan, 'prediction') else None
             # Fallback result (pari_scan_fallback) — only present if fallback ran
@@ -263,6 +301,9 @@ class FallbackIntegrationService:
                 'status': scan.status,
                 'created_at': scan.created_at.isoformat() if scan.created_at else None,
                 'completed_at': scan.completed_at.isoformat() if scan.completed_at else None,
+                'investigation_id': str(scan.investigation_id),
+                'forensic_status': scan.forensic_status,
+                'failure_reason': scan.failure_reason,
                 'initial_model': scan.initial_model,
                 'fallback_model': scan.fallback_model,
                 # Initial RandomForest result — immutable after Phase 3
@@ -319,7 +360,7 @@ class FallbackIntegrationService:
             return None
 
     @staticmethod
-    def persist_evidence_summaries(scan, result_data):
+    def persist_evidence_summaries(scan, result_data, db=None, tenant_id=None):
         """
         Extract compact structured evidence summary records from Nikhil fallback
         evidence and persist them into pari_evidence_summary (ScanEvidenceSummary).
@@ -328,13 +369,11 @@ class FallbackIntegrationService:
         """
         from User.services.nikhil.mongodb_repository import MongoDBRepository
 
+        db = FallbackIntegrationService.resolve_alias(db)
         evidence_data = result_data.get('evidence_data')
-        if not evidence_data:
+        if not evidence_data and tenant_id:
             try:
-                repo = MongoDBRepository()
-                evidence_data = repo.get_evidence(scan.id)
-                if hasattr(repo, "client") and repo.client:
-                    repo.client.close()
+                evidence_data = MongoDBRepository().get_evidence(scan.id, tenant_id=tenant_id)
             except Exception as e:
                 logger.debug("Could not retrieve evidence from MongoDB for scan %s: %s", scan.id, e)
                 evidence_data = None
@@ -613,30 +652,25 @@ class FallbackIntegrationService:
             })
 
         # Persist all via update_or_create (guarantees idempotency on retry)
+        # Failures propagate so the enclosing tenant transaction rolls back.
         for item in summaries_to_record:
-            try:
-                ScanEvidenceSummary.objects.update_or_create(
-                    scan=scan,
-                    evidence_family=item['family'],
-                    defaults={
-                        'source_component': item.get('source_component', ''),
-                        'status': item['status'],
-                        'detected': item['detected'],
-                        'match_found': item['match_found'],
-                        'source_count': item['source_count'],
-                        'evidence_count': item['evidence_count'],
-                        'severity': item['severity'],
-                        'summary': item['summary'],
-                    }
-                )
-            except Exception as item_err:
-                logger.error(
-                    "Failed to write evidence summary %s for scan %s: %s",
-                    item['family'], scan.id, item_err
-                )
+            ScanEvidenceSummary.objects.using(db).update_or_create(
+                scan=scan,
+                evidence_family=item['family'],
+                defaults={
+                    'source_component': (item.get('source_component') or '')[:100],
+                    'status': (item['status'] or 'UNKNOWN')[:30],
+                    'detected': item['detected'],
+                    'match_found': item['match_found'],
+                    'source_count': item['source_count'],
+                    'evidence_count': item['evidence_count'] or 0,
+                    'severity': item['severity'],
+                    'summary': (item['summary'] or '')[:500],
+                }
+            )
 
     @staticmethod
-    def persist_ai_evidence(scan, result_data):
+    def persist_ai_evidence(scan, result_data, db=None, tenant_id=None):
         """
         Extract compact structured AI evidence summary from Nikhil fallback
         and persist it into pari_ai_evidence (ScanAIEvidence).
@@ -651,12 +685,10 @@ class FallbackIntegrationService:
         if evidence_data and 'ai_analysis' in evidence_data:
             ai_data = evidence_data.get('ai_analysis')
 
-        if not ai_data:
+        db = FallbackIntegrationService.resolve_alias(db)
+        if not ai_data and tenant_id:
             try:
-                repo = MongoDBRepository()
-                mongo_doc = repo.get_evidence(scan.id)
-                if hasattr(repo, "client") and repo.client:
-                    repo.client.close()
+                mongo_doc = MongoDBRepository().get_evidence(scan.id, tenant_id=tenant_id)
                 if mongo_doc and 'ai_analysis' in mongo_doc:
                     ai_data = mongo_doc.get('ai_analysis')
             except Exception as e:
@@ -713,7 +745,7 @@ class FallbackIntegrationService:
         status_val = status[:30] if status else 'NOT_RUN'
         reasoning_str = str(reasoning)[:500] if reasoning else ''
 
-        ScanAIEvidence.objects.update_or_create(
+        ScanAIEvidence.objects.using(db).update_or_create(
             scan=scan,
             defaults={
                 'provider': provider[:50] if provider else None,
@@ -853,7 +885,8 @@ class FallbackIntegrationService:
         return source, reason, severity
 
     @staticmethod
-    def persist_final_decision(scan, result_data):
+    def persist_final_decision(scan, result_data, db=None):
+        db = FallbackIntegrationService.resolve_alias(db)
         """
         Record the official final decision in pari_final_decision (ScanFinalDecision).
         Idempotent via update_or_create on scan.
@@ -880,7 +913,7 @@ class FallbackIntegrationService:
             family_count = len(set(families_used))
         else:
             # Fallback: count distinct families in ScanEvidenceSummary with detected or match_found True
-            family_count = ScanEvidenceSummary.objects.filter(
+            family_count = ScanEvidenceSummary.objects.using(db).filter(
                 scan=scan
             ).filter(
                 models.Q(detected=True) | models.Q(match_found=True)
@@ -894,7 +927,7 @@ class FallbackIntegrationService:
 
         decision_method = 'DETERMINISTIC_CORROBORATION'
 
-        ScanFinalDecision.objects.update_or_create(
+        ScanFinalDecision.objects.using(db).update_or_create(
             scan=scan,
             defaults={
                 'final_classification': final_classification,
@@ -910,15 +943,16 @@ class FallbackIntegrationService:
         )
 
     @staticmethod
-    def persist_confident_final_decision(scan, predicted_class, confidence, risk_score):
+    def persist_confident_final_decision(scan, predicted_class, confidence, risk_score, db=None):
         """
         Record the official final decision for confident RandomForest predictions (confidence >= 0.75).
         Idempotent via update_or_create on scan.
         """
         risk_level = 'LOW' if predicted_class == 'Benign' else ('HIGH' if risk_score >= 0.7 else 'MEDIUM')
         summary = f"High-confidence initial Random Forest prediction ({confidence:.2%})"
+        db = FallbackIntegrationService.resolve_alias(db)
 
-        ScanFinalDecision.objects.update_or_create(
+        ScanFinalDecision.objects.using(db).update_or_create(
             scan=scan,
             defaults={
                 'final_classification': predicted_class,
